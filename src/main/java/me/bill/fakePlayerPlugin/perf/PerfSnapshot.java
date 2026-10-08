@@ -6,8 +6,6 @@ import java.lang.management.MemoryUsage;
 import java.time.Instant;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.bukkit.Bukkit;
-
 /**
  * Immutable snapshot of server performance metrics at a single point in time.
  */
@@ -41,16 +39,22 @@ public record PerfSnapshot(
             double gcAvgTime,
             long gcAvgFrequency,
             int botCount) {
+        return create(tps, msptMean, mspt95, cpuProcess, cpuSystem, gcAvgTime, gcAvgFrequency, botCount, -1, -1);
+    }
+
+    public static PerfSnapshot create(
+            double tps,
+            double msptMean,
+            double mspt95,
+            double cpuProcess,
+            double cpuSystem,
+            double gcAvgTime,
+            long gcAvgFrequency,
+            int botCount,
+            int onlinePlayers,
+            int entityCount) {
         MemoryMXBean memory = ManagementFactory.getMemoryMXBean();
         MemoryUsage heap = memory.getHeapMemoryUsage();
-        int online = Bukkit.getOnlinePlayers().size();
-        int entities = 0;
-        try {
-            entities = Bukkit.getWorlds().stream()
-                    .mapToInt(w -> w.getEntities().size())
-                    .sum();
-        } catch (Exception ignored) {
-        }
         return new PerfSnapshot(
                 Instant.now(),
                 tps,
@@ -62,9 +66,27 @@ public record PerfSnapshot(
                 gcAvgFrequency,
                 heap.getUsed() / (1024L * 1024L),
                 heap.getCommitted() / (1024L * 1024L),
-                online,
+                onlinePlayers,
                 botCount,
-                entities);
+                entityCount);
+    }
+
+    public static PerfSnapshot withCounts(PerfSnapshot source, int onlinePlayers, int entityCount) {
+        if (source == null) return null;
+        return new PerfSnapshot(
+                source.timestamp(),
+                source.tps(),
+                source.msptMean(),
+                source.mspt95(),
+                source.cpuProcess(),
+                source.cpuSystem(),
+                source.gcAvgTime(),
+                source.gcAvgFrequency(),
+                source.usedMemoryMb(),
+                source.committedMemoryMb(),
+                onlinePlayers,
+                source.botCount(),
+                entityCount);
     }
 
     /**

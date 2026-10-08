@@ -72,6 +72,11 @@ spawn-name-taken:         "{prefix}<#FF6A5C>ᴀ ʙᴏᴛ ɴᴀᴍᴇᴅ '<#EEECF
 spawn-name-online:        "{prefix}<#FF6A5C>ᴀ ʀᴇᴀʟ ᴘʟᴀʏᴇʀ ɴᴀᴍᴇᴅ '<#EEECF7>{name}</#EEECF7><#FF6A5C>' ɪꜱ ᴏɴʟɪɴᴇ - ᴘɪᴄᴋ ᴀɴᴏᴛʜᴇʀ ɴᴀᴍᴇ."
 spawn-invalid-location:   "{prefix}<#FF6A5C>ᴜꜱᴀɢᴇ: <#EEECF7>--location <x> <y> <z> <world></#EEECF7>."
 # {world} - the world name passed to --location that doesn't exist
+spawn-invalid-options:    "{prefix}<#FF6A5C>ɪɴᴠᴀʟɪᴅ ꜱᴘᴀᴡɴ ᴏᴘᴛɪᴏɴꜱ. <#9691AB>ᴜꜱᴇ <#EEECF7>/fpp spawn [--name NAME] [--count AMOUNT] [--random] [--world WORLD] [--randompos | --spread RADIUS] [--rank MAX_GROUP] [--god] [--donutchat]</#EEECF7><#9691AB>. <#EEECF7>--spread</#EEECF7> <#9691AB>ᴀɴᴅ <#EEECF7>--randompos</#EEECF7> <#9691AB>ᴄᴀɴɴᴏᴛ ʙᴇ ᴄᴏᴍʙɪɴᴇᴅ; <#EEECF7>--name</#EEECF7> <#9691AB>ɪꜱ ꜱɪɴɢʟᴇ-ʙᴏᴛ ᴏɴʟʏ."
+spawn-invalid-spread:     "{prefix}<#FF6A5C>ɪɴᴠᴀʟɪᴅ ꜱᴘʀᴇᴀᴅ ʀᴀᴅɪᴜꜱ. <#9691AB>ᴜꜱᴇ ᴀ ᴡʜᴏʟᴇ ɴᴜᴍʙᴇʀ ꜰʀᴏᴍ <#EEECF7>1</#EEECF7> <#9691AB>ᴛᴏ <#EEECF7>1000</#EEECF7><#9691AB>."
+spawn-rank-no-luckperms:  "{prefix}<#FF6A5C>ʟᴜᴄᴋᴘᴇʀᴍꜱ ɪꜱ ɴᴏᴛ ɪɴꜱᴛᴀʟʟᴇᴅ ᴏʀ ɴᴏᴛ ʀᴇᴀᴅʏ."
+spawn-rank-no-provider:   "{prefix}<#FF6A5C>ᴘʜᴏᴇɴɪx ᴏʀ ʟᴜᴄᴋᴘᴇʀᴍꜱ ɪꜱ ɴᴏᴛ ɪɴꜱᴛᴀʟʟᴇᴅ ᴏʀ ɴᴏᴛ ʀᴇᴀᴅʏ."
+spawn-rank-not-found:     "{prefix}<#FF6A5C>{provider} ʀᴀɴᴋ '<#EEECF7>{rank}</#EEECF7><#FF6A5C>' ᴡᴀꜱ ɴᴏᴛ ꜰᴏᴜɴᴅ."
 spawn-world-not-found:    "{prefix}<#FF6A5C>ᴡᴏʀʟᴅ '<#EEECF7>{world}</#EEECF7><#FF6A5C>' ᴡᴀꜱ ɴᴏᴛ ꜰᴏᴜɴᴅ."
 # {name} - bot name  |  {rarity} - e.g. 1/5000; sent to the spawner when a rare pool skin is rolled
 skin-rare-rolled:         "{prefix}<#BAFF4F>✨ <#A78BFA>{name}</#A78BFA> <#BAFF4F>ꜱᴘᴀᴡɴᴇᴅ ᴡɪᴛʜ ᴀ ʀᴀʀᴇ ꜱᴋɪɴ! <#5F5B73>(<#EEECF7>{rarity}</#EEECF7> ᴄʜᴀɴᴄᴇ<#5F5B73>)"

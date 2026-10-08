@@ -47,6 +47,15 @@ public final class FakeChannel extends AbstractChannel {
         return packetListener;
     }
 
+    void markDisconnected() {
+        active = false;
+    }
+
+    void markClosed() {
+        active = false;
+        open = false;
+    }
+
     @Override
     public ChannelConfig config() {
         config.setAutoRead(true);
@@ -111,15 +120,12 @@ public final class FakeChannel extends AbstractChannel {
 
     @Override
     protected void doDisconnect() {
-
-        active = false;
+        markDisconnected();
     }
 
     @Override
     protected void doClose() {
-
-        active = false;
-        open = false;
+        markClosed();
     }
 
     @Override

@@ -97,6 +97,8 @@ public final class FakePlayer {
 
     private String luckpermsGroup = null;
 
+    private boolean godMode = false;
+
     private BotType botType = BotType.AFK;
 
     // Inert persistence fields: the chat system was removed, but these per-bot
@@ -406,6 +408,22 @@ public final class FakePlayer {
 
     public void setLuckpermsGroup(String group) {
         this.luckpermsGroup = group;
+    }
+
+    public String getRankName() {
+        return luckpermsGroup;
+    }
+
+    public void setRankName(String rankName) {
+        this.luckpermsGroup = rankName;
+    }
+
+    public boolean isGodMode() {
+        return godMode;
+    }
+
+    public void setGodMode(boolean godMode) {
+        this.godMode = godMode;
     }
 
     public boolean isInventoryOpen() {

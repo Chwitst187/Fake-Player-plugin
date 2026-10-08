@@ -119,6 +119,7 @@ public class PlayerJoinListener implements Listener {
         if (fp != null) {
             return;
         }
+        manager.trackRealPlayerJoin(event.getPlayer());
 
         try {
             var upd = plugin.getUpdateNotification();
@@ -213,6 +214,7 @@ public class PlayerJoinListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onQuit(PlayerQuitEvent event) {
         UUID uuid = event.getPlayer().getUniqueId();
+        manager.trackRealPlayerQuit(event.getPlayer());
 
         // The hide-nametag team is never registered with the real scoreboard, so a rejoining client
         // has no memory of it - forget them so the next join re-syncs from scratch.

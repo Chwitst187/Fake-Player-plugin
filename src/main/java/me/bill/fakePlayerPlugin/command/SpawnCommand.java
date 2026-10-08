@@ -1,6 +1,5 @@
 package me.bill.fakePlayerPlugin.command;
 
-import java.util.ArrayList;
 import java.util.List;
 
 import org.bukkit.Bukkit;
@@ -12,19 +11,18 @@ import org.bukkit.entity.Player;
 import me.bill.fakePlayerPlugin.config.Config;
 import me.bill.fakePlayerPlugin.fakeplayer.BotType;
 import me.bill.fakePlayerPlugin.fakeplayer.FakePlayerManager;
+import me.bill.fakePlayerPlugin.fakeplayer.RankIntegration;
 import me.bill.fakePlayerPlugin.lang.Lang;
 import me.bill.fakePlayerPlugin.permission.Perm;
 
 /**
- * Spawns exactly one bot per invocation - auto-named ({@code bot}, {@code bot2}, …) or custom-named
- * via {@code --name}. The old bulk form ({@code /fpp spawn <amount>}) and the bot-type tag were
- * removed deliberately: one command, one bot.
+ * Spawns one or more bots — sequentially named ({@code bot}, {@code bot2}, …), randomly named via
+ * {@code --random}, custom-named via {@code --name} for a single spawn, or evenly distributed around
+ * the sender via {@code --spread}. A target world can be selected via {@code --world};
+ * {@code --randompos} chooses independent random positions in that world.
  *
- * <p>Bots spawn at the commanding player's own location by default, or wherever an admin (holding
- * {@link Perm#SPAWN}) targets with {@code --location <x> <y> <z> <world>}. Console and command-block
- * senders have no location of their own to fall back on, so {@code --location} is mandatory for them
- * - and, since they can't own bots personally, they can only use the admin tier, never
- * {@link Perm#USER_SPAWN}.
+ * <p>In-game only: bots spawn at the commanding player's location by default. An explicit target
+ * world uses that world's spawn as the shared origin.
  */
 public class SpawnCommand implements FppCommand {
 
@@ -41,13 +39,13 @@ public class SpawnCommand implements FppCommand {
 
     @Override
     public String getUsage() {
-        return "[--name <name>] [--location <x> <y> <z> <world>]";
+        return "[--name <name>] [--count <amount>] [--random] [--world <world>] "
+                + "[--randompos | --spread <radius>] [--rank <maximum-group>] [--god] [--donutchat]";
     }
 
     @Override
     public String getDescription() {
-        return "Spawns a fake player bot at your location, or --location <x> <y> <z> <world> (admin"
-                + " only; required from console/command blocks).";
+        return "Spawns one or more fake player bots in a selected world and position mode.";
     }
 
     @Override
@@ -62,7 +60,10 @@ public class SpawnCommand implements FppCommand {
 
     @Override
     public boolean execute(CommandSender sender, String[] args) {
-        Player player = sender instanceof Player p ? p : null;
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage(Lang.get("player-only"));
+            return true;
+        }
 
         boolean isAdmin = Perm.has(sender, Perm.SPAWN);
         boolean isUser = !isAdmin && Perm.has(sender, Perm.USER_SPAWN);
@@ -72,70 +73,53 @@ public class SpawnCommand implements FppCommand {
             return true;
         }
 
-        // User-tier spawning tracks personal ownership, a bot limit, and a cooldown against a real
-        // player's UUID - none of which exist for console/command-block senders, so they're admin-only.
-        if (player == null && !isAdmin) {
-            sender.sendMessage(Lang.get("player-only"));
+        SpawnOptions options = SpawnOptions.parse(args);
+        if (!options.isValid()) {
+            String errorKey =
+                    switch (options.error()) {
+                        case INVALID_COUNT -> "invalid-number";
+                        case INVALID_SPREAD -> "spawn-invalid-spread";
+                        default -> "spawn-invalid-options";
+                    };
+            sender.sendMessage(Lang.get(errorKey));
             return true;
         }
 
-        List<String> positional = new ArrayList<>(List.of(args));
-
-        String customName = null;
-        int nameFlag = positional.indexOf("--name");
-        if (nameFlag >= 0) {
-            if (nameFlag + 1 >= positional.size()) {
-                sender.sendMessage(Lang.get("spawn-invalid-name", "name", ""));
-                return true;
-            }
-            customName = positional.get(nameFlag + 1);
-            positional.remove(nameFlag + 1);
-            positional.remove(nameFlag);
-        }
-
-        Location location = player != null ? player.getLocation().clone() : null;
-
-        int locationFlag = positional.indexOf("--location");
-        if (locationFlag >= 0) {
-            if (!isAdmin) {
+        if (options.maximumRank() != null) {
+            if (!Perm.has(sender, Perm.SPAWN_RANK)) {
                 sender.sendMessage(Lang.get("no-permission"));
                 return true;
             }
-            if (locationFlag + 4 >= positional.size()) {
-                sender.sendMessage(Lang.get("spawn-invalid-location"));
+            if (!RankIntegration.isAvailable()) {
+                sender.sendMessage(Lang.get("spawn-rank-no-provider"));
                 return true;
             }
-
-            double x, y, z;
-            try {
-                x = Double.parseDouble(positional.get(locationFlag + 1));
-                y = Double.parseDouble(positional.get(locationFlag + 2));
-                z = Double.parseDouble(positional.get(locationFlag + 3));
-            } catch (NumberFormatException e) {
-                sender.sendMessage(Lang.get("spawn-invalid-location"));
+            if (!RankIntegration.rankExists(options.maximumRank())) {
+                sender.sendMessage(Lang.get(
+                        "spawn-rank-not-found",
+                        "rank",
+                        options.maximumRank(),
+                        "provider",
+                        RankIntegration.providerName()));
                 return true;
             }
-
-            String worldName = positional.get(locationFlag + 4);
-            World world = Bukkit.getWorld(worldName);
-            if (world == null) {
-                sender.sendMessage(Lang.get("spawn-world-not-found", "world", worldName));
-                return true;
-            }
-
-            float yaw = player != null ? player.getLocation().getYaw() : 0f;
-            float pitch = player != null ? player.getLocation().getPitch() : 0f;
-            location = new Location(world, x, y, z, yaw, pitch);
         }
-
-        if (location == null) {
-            // Console/command-block sender that didn't pass --location - there's no player position to
-            // fall back on.
-            sender.sendMessage(Lang.get("spawn-invalid-location"));
+        if (options.godMode() && !Perm.has(sender, Perm.SPAWN_GOD)) {
+            sender.sendMessage(Lang.get("no-permission"));
+            return true;
+        }
+        if (options.donutChat() && !Perm.has(sender, Perm.SPAWN_DONUT_CHAT)) {
+            sender.sendMessage(Lang.get("no-permission"));
             return true;
         }
 
-        if (player != null && !Perm.has(sender, Perm.BYPASS_COOLDOWN) && manager.isOnCooldown(player.getUniqueId())) {
+        Location location = resolveSpawnOrigin(player, options.worldName());
+        if (location == null) {
+            sender.sendMessage(Lang.get("spawn-world-not-found", "world", String.valueOf(options.worldName())));
+            return true;
+        }
+
+        if (!Perm.has(sender, Perm.BYPASS_COOLDOWN) && manager.isOnCooldown(player.getUniqueId())) {
             long remaining = manager.getRemainingCooldown(player.getUniqueId());
             sender.sendMessage(Lang.get("spawn-cooldown", "seconds", String.valueOf(remaining)));
             return true;
@@ -149,24 +133,61 @@ public class SpawnCommand implements FppCommand {
                 sender.sendMessage(Lang.get("spawn-user-limit-reached", "limit", String.valueOf(limit)));
                 return true;
             }
+            int count = Math.min(options.count(), limit - alreadyOwned);
 
-            int result = customName != null
-                    ? manager.spawn(location, 1, player, customName, false, BotType.AFK)
-                    : manager.spawnUserBot(location, 1, player, false, BotType.AFK);
-            if (handleSpawnResult(sender, result, customName)) {
+            int result = options.customName() != null
+                    ? manager.spawn(
+                            location,
+                            1,
+                            player,
+                            options.customName(),
+                            false,
+                            BotType.AFK,
+                            false,
+                            0,
+                            options.randomPositions(),
+                            options.maximumRank(),
+                            options.godMode(),
+                            options.donutChat())
+                    : manager.spawnUserBot(
+                            location,
+                            count,
+                            player,
+                            false,
+                            BotType.AFK,
+                            options.randomNames(),
+                            options.spreadRadius(),
+                            options.randomPositions(),
+                            options.maximumRank(),
+                            options.godMode(),
+                            options.donutChat());
+            if (handleSpawnResult(sender, result, options.customName())) {
                 manager.recordSpawnCooldown(player.getUniqueId());
-                sender.sendMessage(
-                        Lang.get("spawn-success", "count", "1", "total", String.valueOf(manager.getCount())));
+                sender.sendMessage(Lang.get(
+                        "spawn-success", "count", String.valueOf(result), "total", String.valueOf(manager.getCount())));
             }
             return true;
         }
 
         boolean bypassMax = Perm.has(sender, Perm.BYPASS_MAX);
 
-        int result = manager.spawn(location, 1, player, customName, bypassMax, BotType.AFK);
-        if (handleSpawnResult(sender, result, customName)) {
-            if (player != null) manager.recordSpawnCooldown(player.getUniqueId());
-            sender.sendMessage(Lang.get("spawn-success", "count", "1", "total", String.valueOf(manager.getCount())));
+        int result = manager.spawn(
+                location,
+                options.count(),
+                player,
+                options.customName(),
+                bypassMax,
+                BotType.AFK,
+                options.randomNames(),
+                options.spreadRadius(),
+                options.randomPositions(),
+                options.maximumRank(),
+                options.godMode(),
+                options.donutChat());
+        if (handleSpawnResult(sender, result, options.customName())) {
+            manager.recordSpawnCooldown(player.getUniqueId());
+            sender.sendMessage(Lang.get(
+                    "spawn-success", "count", String.valueOf(result), "total", String.valueOf(manager.getCount())));
         }
         return true;
     }
@@ -192,34 +213,100 @@ public class SpawnCommand implements FppCommand {
     public List<String> tabComplete(CommandSender sender, String[] args) {
         if (!canUse(sender)) return List.of();
 
-        boolean isAdmin = Perm.has(sender, Perm.SPAWN);
-        List<String> positional = new ArrayList<>(List.of(args));
-        String typed = positional.isEmpty() ? "" : positional.getLast().toLowerCase();
+        String typed = args.length == 0 ? "" : args[args.length - 1].toLowerCase();
+        List<String> completed = args.length <= 1 ? List.of() : List.of(args).subList(0, args.length - 1);
 
-        // Directly after "--name" the next token is free text.
-        if (positional.size() >= 2 && "--name".equals(positional.get(positional.size() - 2))) {
+        if (!completed.isEmpty() && "--name".equalsIgnoreCase(completed.getLast())) {
             return List.of();
         }
-
-        int locationFlag = positional.indexOf("--location");
-        if (isAdmin && locationFlag >= 0 && positional.size() > locationFlag + 1) {
-            int offset = positional.size() - 1 - locationFlag; // 1=x, 2=y, 3=z, 4=world
-            return switch (offset) {
-                case 1 -> typed.isEmpty() ? List.of("<x>") : List.of();
-                case 2 -> typed.isEmpty() ? List.of("<y>") : List.of();
-                case 3 -> typed.isEmpty() ? List.of("<z>") : List.of();
-                case 4 -> Bukkit.getWorlds().stream()
-                        .map(World::getName)
-                        .filter(n -> n.toLowerCase().startsWith(typed))
-                        .toList();
-                default -> List.of();
-            };
+        if (!completed.isEmpty() && "--count".equalsIgnoreCase(completed.getLast())) {
+            return countSuggestions(sender, typed);
+        }
+        if (!completed.isEmpty() && "--spread".equalsIgnoreCase(completed.getLast())) {
+            return spreadSuggestions(typed);
+        }
+        if (!completed.isEmpty() && "--world".equalsIgnoreCase(completed.getLast())) {
+            return worldSuggestions(typed);
+        }
+        if (!completed.isEmpty() && "--rank".equalsIgnoreCase(completed.getLast())) {
+            return rankSuggestions(typed);
         }
 
-        List<String> suggestions = new ArrayList<>();
-        boolean nameUsed = positional.contains("--name");
-        if (!nameUsed && "--name".startsWith(typed)) suggestions.add("--name");
-        if (isAdmin && locationFlag < 0 && "--location".startsWith(typed)) suggestions.add("--location");
+        boolean nameUsed = completed.stream().anyMatch("--name"::equalsIgnoreCase);
+        boolean countUsed = completed.stream().anyMatch("--count"::equalsIgnoreCase);
+        boolean randomUsed = completed.stream().anyMatch("--random"::equalsIgnoreCase);
+        boolean spreadUsed = completed.stream().anyMatch("--spread"::equalsIgnoreCase);
+        boolean worldUsed = completed.stream().anyMatch("--world"::equalsIgnoreCase);
+        boolean randomPositionsUsed = completed.stream().anyMatch("--randompos"::equalsIgnoreCase);
+        boolean rankUsed = completed.stream().anyMatch("--rank"::equalsIgnoreCase);
+        boolean godModeUsed = completed.stream().anyMatch("--god"::equalsIgnoreCase);
+        boolean donutChatUsed = completed.stream().anyMatch("--donutchat"::equalsIgnoreCase);
+
+        List<String> suggestions = new java.util.ArrayList<>();
+        if (!nameUsed && !countUsed && !randomUsed && !spreadUsed && "--name".startsWith(typed)) {
+            suggestions.add("--name");
+        }
+        if (!nameUsed && !countUsed && "--count".startsWith(typed)) suggestions.add("--count");
+        if (!nameUsed && !randomUsed && "--random".startsWith(typed)) suggestions.add("--random");
+        if (!randomPositionsUsed && !spreadUsed && "--spread".startsWith(typed)) suggestions.add("--spread");
+        if (!worldUsed && "--world".startsWith(typed)) suggestions.add("--world");
+        if (!spreadUsed && !randomPositionsUsed && "--randompos".startsWith(typed)) suggestions.add("--randompos");
+        if (!rankUsed && Perm.has(sender, Perm.SPAWN_RANK) && "--rank".startsWith(typed)) {
+            suggestions.add("--rank");
+        }
+        if (!godModeUsed && Perm.has(sender, Perm.SPAWN_GOD) && "--god".startsWith(typed)) {
+            suggestions.add("--god");
+        }
+        if (!donutChatUsed && Perm.has(sender, Perm.SPAWN_DONUT_CHAT) && "--donutchat".startsWith(typed)) {
+            suggestions.add("--donutchat");
+        }
         return suggestions;
+    }
+
+    private Location resolveSpawnOrigin(Player player, String worldName) {
+        if (worldName == null) return player.getLocation().clone();
+
+        World target = Bukkit.getWorld(worldName);
+        if (target == null) {
+            target = Bukkit.getWorlds().stream()
+                    .filter(world -> world.getName().equalsIgnoreCase(worldName))
+                    .findFirst()
+                    .orElse(null);
+        }
+        return target != null ? target.getSpawnLocation().clone() : null;
+    }
+
+    private List<String> worldSuggestions(String typed) {
+        return Bukkit.getWorlds().stream()
+                .map(World::getName)
+                .filter(name -> name.toLowerCase().startsWith(typed.toLowerCase()))
+                .toList();
+    }
+
+    private List<String> spreadSuggestions(String typed) {
+        return List.of("2", "4", "6", "8", "10", "16").stream()
+                .filter(value -> value.startsWith(typed))
+                .toList();
+    }
+
+    private List<String> rankSuggestions(String typed) {
+        return RankIntegration.rankNames().stream()
+                .filter(group -> group.toLowerCase().startsWith(typed.toLowerCase()))
+                .toList();
+    }
+
+    private List<String> countSuggestions(CommandSender sender, String typed) {
+        if (Perm.has(sender, Perm.SPAWN)) {
+            return Config.spawnCountPresets().stream()
+                    .filter(value -> value.startsWith(typed))
+                    .toList();
+        }
+
+        int permissionLimit = Perm.resolveUserBotLimit(sender);
+        int limit = permissionLimit >= 0 ? permissionLimit : Config.userBotLimit();
+        return java.util.stream.IntStream.rangeClosed(1, Math.min(limit, 10))
+                .mapToObj(String::valueOf)
+                .filter(value -> value.startsWith(typed))
+                .toList();
     }
 }

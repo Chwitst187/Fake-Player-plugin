@@ -169,13 +169,22 @@ public final class FakeServerGamePacketListenerImpl extends ServerGamePacketList
                         cookie);
     }
 
+    /**
+     * Closes the synthetic network connection and lets Folia's region connection tick perform the
+     * normal {@link #onDisconnect(DisconnectionDetails)} lifecycle. Removing the player directly
+     * through PlayerList would leave this connection in RegionizedWorldData.
+     */
+    public void requestSyntheticDisconnect() {
+        this.connection.disconnect(net.minecraft.network.chat.Component.empty());
+    }
+
     @Override
     public void onDisconnect(@NotNull DisconnectionDetails details) {
         String playerName = this.player.getScoreboardName();
         String reasonStr = details.reason() != null ? details.reason().getString() : "null";
         Config.debugNmsConn("onDisconnect: player='" + playerName + "' reason='" + reasonStr + "'");
         try {
-            super.onDisconnect(details);
+            NmsPlayerSpawner.runWithSyntheticQuitListenerSuppression(() -> super.onDisconnect(details));
             Config.debugNmsConn("onDisconnect completed for '" + playerName + "'");
         } catch (IllegalStateException e) {
             if ("Already retired".equals(e.getMessage())) {

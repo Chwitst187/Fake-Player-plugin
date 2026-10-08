@@ -356,11 +356,13 @@ public final class FakeChannelPipeline implements ChannelPipeline {
 
     @Override
     public ChannelFuture disconnect() {
+        markDisconnected();
         return newSucceededFuture();
     }
 
     @Override
     public ChannelFuture close() {
+        markClosed();
         return newSucceededFuture();
     }
 
@@ -389,12 +391,14 @@ public final class FakeChannelPipeline implements ChannelPipeline {
 
     @Override
     public ChannelFuture disconnect(ChannelPromise p) {
+        markDisconnected();
         p.setSuccess();
         return p;
     }
 
     @Override
     public ChannelFuture close(ChannelPromise p) {
+        markClosed();
         p.setSuccess();
         return p;
     }
@@ -420,6 +424,14 @@ public final class FakeChannelPipeline implements ChannelPipeline {
             Consumer<Object> listener = fc.getPacketListener();
             if (listener != null) listener.accept(msg);
         }
+    }
+
+    private void markDisconnected() {
+        if (channel instanceof FakeChannel fakeChannel) fakeChannel.markDisconnected();
+    }
+
+    private void markClosed() {
+        if (channel instanceof FakeChannel fakeChannel) fakeChannel.markClosed();
     }
 
     @Override

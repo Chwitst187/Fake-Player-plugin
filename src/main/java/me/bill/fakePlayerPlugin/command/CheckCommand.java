@@ -27,6 +27,7 @@ import me.bill.fakePlayerPlugin.util.FppLogger;
 import me.bill.fakePlayerPlugin.util.FppScheduler;
 
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
 
 /**
@@ -39,11 +40,11 @@ import net.kyori.adventure.text.format.TextColor;
  */
 public final class CheckCommand implements FppCommand {
 
-    private static final TextColor LABEL = TextColor.fromHexString("#9691AB");
-    private static final TextColor MUTED = TextColor.fromHexString("#5F5B73");
-    private static final TextColor OK = TextColor.fromHexString("#BAFF4F");
-    private static final TextColor WARN = TextColor.fromHexString("#BAFF4F");
-    private static final TextColor ERR = TextColor.fromHexString("#FF6A5C");
+    private static final TextColor LABEL = NamedTextColor.GRAY;
+    private static final TextColor MUTED = NamedTextColor.DARK_GRAY;
+    private static final TextColor OK = NamedTextColor.GREEN;
+    private static final TextColor WARN = NamedTextColor.YELLOW;
+    private static final TextColor ERR = NamedTextColor.RED;
 
     private final FakePlayerPlugin plugin;
     private final FakePlayerManager manager;
@@ -156,7 +157,7 @@ public final class CheckCommand implements FppCommand {
             if (nmsAvailable) {
                 ok(sender, "NmsPlayerSpawner available");
             } else {
-                err(sender, "NmsPlayerSpawner NOT available - unsupported server version");
+                err(sender, "NmsPlayerSpawner NOT available — unsupported server version");
                 issues++;
             }
 
@@ -176,7 +177,7 @@ public final class CheckCommand implements FppCommand {
                 World w =
                         Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().getFirst();
                 if (w == null) {
-                    err(sender, "  No worlds - simulation aborted");
+                    err(sender, "  No worlds — simulation aborted");
                     issues++;
                 } else {
                     Location simLoc = w.getSpawnLocation();
@@ -217,7 +218,7 @@ public final class CheckCommand implements FppCommand {
             log(sender, "[4/12] Checking database...");
             DatabaseManager db = plugin.getDatabaseManager();
             if (db == null) {
-                warn(sender, "DatabaseManager is null - using YAML fallback");
+                warn(sender, "DatabaseManager is null — using YAML fallback");
                 warnings++;
             } else {
                 Connection conn = db.getConnection();
@@ -265,7 +266,7 @@ public final class CheckCommand implements FppCommand {
             log(sender, "[5/12] Checking Folia scheduler...");
             boolean folia = NmsPlayerSpawner.isFoliaServer();
             if (folia) {
-                ok(sender, "Folia detected - using region schedulers");
+                ok(sender, "Folia detected — using region schedulers");
 
                 // Verify all bots are on correct threads
                 int bad = 0;
@@ -276,7 +277,7 @@ public final class CheckCommand implements FppCommand {
                             p.getLocation();
                         } catch (Exception e) {
                             bad++;
-                            log(sender, "    Bot " + fp.getName() + " on wrong region thread!");
+                            warn(sender, "  " + bad + " bot(s) on wrong region thread");
                         }
                     }
                 }
@@ -287,7 +288,7 @@ public final class CheckCommand implements FppCommand {
                     ok(sender, "  All bots on correct region threads");
                 }
             } else {
-                ok(sender, "Paper detected - using BukkitScheduler");
+                ok(sender, "Paper detected — using BukkitScheduler");
             }
 
             // Verify scheduler utility
@@ -370,7 +371,7 @@ public final class CheckCommand implements FppCommand {
         /* ================================================================ */
         if (checkExtensions) {
             log(sender, "[9/12] Checking soft-depends...");
-            // (LuckPerms is intentionally not checked here - FPP no longer hooks it)
+            // (LuckPerms is intentionally not checked here — FPP no longer hooks it)
             Plugin papi = Bukkit.getPluginManager().getPlugin("PlaceholderAPI");
             Plugin we = Bukkit.getPluginManager().getPlugin("WorldEdit");
             status(sender, "PlaceholderAPI", papi != null && papi.isEnabled());
@@ -470,11 +471,11 @@ public final class CheckCommand implements FppCommand {
         /* ================================================================ */
         log(sender, "Health check complete.");
         if (issues == 0 && warnings == 0) {
-            ok(sender, "All systems operational - 0 issues found.");
+            ok(sender, "All systems operational — 0 issues found.");
             FppLogger.info("[CHECK] All systems operational.");
         } else {
             warn(sender, "Found " + issues + " error(s) and " + warnings + " warning(s).");
-            FppLogger.warn("[CHECK] " + issues + " error(s), " + warnings + " warning(s) found.");
+            FppLogger.error("[CHECK] " + issues + " error(s), " + warnings + " warning(s) found.");
         }
 
         return true;
@@ -528,14 +529,14 @@ public final class CheckCommand implements FppCommand {
                 .append(Component.text("    ").color(MUTED))
                 .append(Component.text("✘ ").color(ERR))
                 .append(Component.text(message).color(ERR)));
-        FppLogger.warn("[CHECK] [ERR] " + message);
+        FppLogger.error("[CHECK] [ERR] " + message);
     }
 
     private void status(CommandSender sender, String key, boolean ok) {
         if (ok) {
             ok(sender, key);
         } else {
-            warn(sender, key + " - MISSING / FAILED");
+            warn(sender, key + " — MISSING / FAILED");
         }
     }
 

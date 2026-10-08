@@ -24,22 +24,22 @@ import me.bill.fakePlayerPlugin.fakeplayer.FakePlayerManager;
 import me.bill.fakePlayerPlugin.gui.HelpGui;
 import me.bill.fakePlayerPlugin.lang.Lang;
 import me.bill.fakePlayerPlugin.permission.Perm;
-import me.bill.fakePlayerPlugin.util.AttributionManager;
 import me.bill.fakePlayerPlugin.util.BotAccess;
 import me.bill.fakePlayerPlugin.util.TextUtil;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 
 public class CommandManager implements CommandExecutor, TabCompleter {
 
-    private static final TextColor ACCENT = TextColor.fromHexString("#A78BFA");
-    private static final TextColor DARK_GRAY = TextColor.fromHexString("#5F5B73");
-    private static final TextColor GRAY = TextColor.fromHexString("#9691AB");
-    private static final TextColor WHITE = TextColor.fromHexString("#EEECF7");
+    private static final TextColor ACCENT = TextColor.fromHexString("#0079FF");
+    private static final TextColor DARK_GRAY = NamedTextColor.DARK_GRAY;
+    private static final TextColor GRAY = NamedTextColor.GRAY;
+    private static final TextColor WHITE = NamedTextColor.WHITE;
 
     private final List<FppCommand> commands = new ArrayList<>();
     private final Map<String, FppCommand> byName = new LinkedHashMap<>();
@@ -265,7 +265,7 @@ public class CommandManager implements CommandExecutor, TabCompleter {
     private void sendPluginInfo(CommandSender sender) {
         String version = plugin.getPluginMeta().getVersion();
         List<String> authors = plugin.getPluginMeta().getAuthors();
-        String author = AttributionManager.formatAuthors(authors);
+        String author = authors.isEmpty() ? "Unknown" : String.join(", ", authors);
 
         Component divider = TextUtil.colorize(Lang.raw("divider"));
         Component header = TextUtil.colorize(Lang.raw("info-screen-header"));

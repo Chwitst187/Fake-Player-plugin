@@ -24,11 +24,16 @@ version = "2.0.6.1"
 
 repositories {
     mavenCentral()
+    maven("https://maven.maxhenkel.de/repository/public")
     maven("https://maven.enginehub.org/repo/")
     maven("https://repo.extendedclip.com/content/repositories/placeholderapi/")
     maven("https://repo.faststats.dev/releases")
     maven("https://repo.papermc.io/repository/maven-public/")
     maven("https://repo.lucko.me/")
+    maven {
+        name = "refine-public"
+        url = uri("https://maven.refinedev.org/public-repo/")
+    }
 }
 
 dependencies {
@@ -42,12 +47,16 @@ dependencies {
     implementation("de.bsommerfeld.pathetic:api:5.5.2")
 
     compileOnly("me.clip:placeholderapi:2.12.2")
+    compileOnly("net.luckperms:api:5.5")
     compileOnly("com.sk89q.worldguard:worldguard-bukkit:7.0.12") {
         exclude("com.google.code.gson", "gson")
         exclude("com.google.guava", "guava")
         exclude("it.unimi.dsi", "fastutil")
     }
     compileOnly("me.lucko:spark-api:0.1-SNAPSHOT")
+    compileOnly("xyz.refinedev.phoenix:pxAPI:2.0.3")
+    compileOnly("xyz.refinedev.practice:BoltAPI:1.0.8")
+    implementation("de.maxhenkel.voicechat:voicechat-api:2.6.20")
 
     // nLogin (nickuc.com's closed-source auth plugin) is a paid plugin with no public Maven
     // artifact, so its API (com.nickuc.login.api.nLoginAPI, used by auth.BotAuthManager's

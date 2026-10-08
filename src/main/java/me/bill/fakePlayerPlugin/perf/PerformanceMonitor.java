@@ -32,6 +32,7 @@ public final class PerformanceMonitor {
     private PerformanceReportExporter reportExporter;
     private final LinkedList<PerfSnapshot> history = new LinkedList<>();
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private final AtomicBoolean sampling = new AtomicBoolean(false);
     private final AtomicInteger consecutiveWarnings = new AtomicInteger(0);
     private volatile Instant lastWarningAt = Instant.MIN;
     private volatile int taskId = -1;
@@ -70,16 +71,51 @@ public final class PerformanceMonitor {
 
     private void tick() {
         if (!running.get()) return;
-        try {
-            PerfSnapshot snapshot = provider.snapshot(manager.getCount());
-            synchronized (history) {
-                history.addLast(snapshot);
-                pruneHistory();
-            }
-            evaluateWarnings(snapshot);
-        } catch (Exception e) {
-            FppLogger.debug("PerformanceMonitor tick failed: " + e.getMessage());
+        if (!sampling.compareAndSet(false, true)) {
+            return;
         }
+
+        int botCount = manager.getCount();
+        FppScheduler.runAsync(plugin, () -> {
+            PerfSnapshot asyncSnapshot = null;
+            try {
+                asyncSnapshot = provider.snapshot(botCount);
+            } catch (Exception e) {
+                FppLogger.debug("PerformanceMonitor snapshot failed: " + e.getMessage());
+            }
+
+            final PerfSnapshot finalAsyncSnapshot = asyncSnapshot;
+            FppScheduler.runSync(plugin, () -> {
+                try {
+                    if (!running.get() || finalAsyncSnapshot == null) {
+                        return;
+                    }
+
+                    int online = Bukkit.getOnlinePlayers().size();
+                    int entities = 0;
+                    try {
+                        entities = Bukkit.getWorlds().stream()
+                                .mapToInt(world -> world.getEntities().size())
+                                .sum();
+                    } catch (Exception ignored) {
+                    }
+
+                    PerfSnapshot finalizedSnapshot = PerfSnapshot.withCounts(finalAsyncSnapshot, online, entities);
+
+                    synchronized (history) {
+                        history.addLast(finalizedSnapshot);
+                        pruneHistory();
+                    }
+                    evaluateWarnings(finalizedSnapshot);
+                } finally {
+                    sampling.set(false);
+                }
+            });
+        });
+    }
+
+    private PerfSnapshot createFallbackSnapshot(int botCount) {
+        return PerfSnapshot.create(-1, -1, -1, -1, -1, 0, -1, botCount);
     }
 
     private void pruneHistory() {
@@ -146,8 +182,11 @@ public final class PerformanceMonitor {
 
     public PerfSnapshot latest() {
         synchronized (history) {
-            return history.isEmpty() ? provider.snapshot(manager.getCount()) : history.getLast();
+            if (!history.isEmpty()) {
+                return history.getLast();
+            }
         }
+        return createFallbackSnapshot(manager.getCount());
     }
 
     public List<PerfSnapshot> history() {

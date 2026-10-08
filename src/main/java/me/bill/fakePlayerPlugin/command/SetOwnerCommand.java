@@ -65,7 +65,7 @@ public final class SetOwnerCommand implements FppCommand {
         OfflinePlayer target = Bukkit.getOfflinePlayer(args[1]);
         UUID uuid = target.getUniqueId();
         String name = target.getName() != null ? target.getName() : args[1];
-        fp.setSpawnedBy(name, uuid);
+        manager.updateOwner(fp, name, uuid);
         me.bill.fakePlayerPlugin.fakeplayer.FakePlayerBody.refreshNametag(fp);
         fp.clearSharedControllers();
         if (Config.databaseEnabled() && plugin.getDatabaseManager() != null) {
@@ -85,7 +85,7 @@ public final class SetOwnerCommand implements FppCommand {
                 if (fp.getName().toLowerCase(Locale.ROOT).startsWith(prefix)) out.add(fp.getName());
         } else if (args.length == 2) {
             String prefix = args[1].toLowerCase(Locale.ROOT);
-            for (Player p : Bukkit.getOnlinePlayers())
+            for (Player p : manager.getRealPlayers())
                 if (p.getName().toLowerCase(Locale.ROOT).startsWith(prefix)) out.add(p.getName());
         }
         return out;

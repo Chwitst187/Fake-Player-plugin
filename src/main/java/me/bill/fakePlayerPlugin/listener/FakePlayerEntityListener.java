@@ -64,7 +64,7 @@ public class FakePlayerEntityListener implements Listener {
         this.chunkLoader = chunkLoader;
     }
 
-    /** Bots never show a death/kill message in chat - matches the rest of the chat-suppression design. */
+    /** Bots never show a death/kill message in chat — matches the rest of the chat-suppression design. */
     @EventHandler(priority = EventPriority.LOWEST)
     public void onBotDeathMessage(PlayerDeathEvent event) {
         if (!isFakeBotBody(event.getEntity())) return;
@@ -89,6 +89,11 @@ public class FakePlayerEntityListener implements Listener {
         }
 
         preDamageHealth.put(event, p.getHealth());
+        if (fp.isGodMode()) {
+            event.setCancelled(true);
+            Config.debugNmsDamage("god mode cancelled damage for " + fp.getName());
+            return;
+        }
         if (event.isCancelled()) return;
 
         Entity damager = null;
@@ -313,6 +318,7 @@ public class FakePlayerEntityListener implements Listener {
 
                                     fp.setPlayer(newEntity);
                                     fp.setAlive(true);
+                                    newEntity.setInvulnerable(fp.isGodMode());
                                     recentBotDeaths.remove(botUuid);
                                     manager.registerEntityIndex(newEntity.getEntityId(), fp);
 

@@ -180,6 +180,7 @@ public final class AttackCommand implements FppCommand {
         Player bot = fp.getPlayer();
         if (bot == null) return;
         stopAttacking(fp.getUuid());
+        manager.beginExclusiveAction(fp.getUuid(), FakePlayerManager.BotAction.ATTACK);
         FppApiImpl.fireTaskEvent(fp, "attack", FppBotTaskEvent.Action.START);
         UUID uuid = fp.getUuid();
         cooldownTicks.put(uuid, 0);
@@ -224,7 +225,7 @@ public final class AttackCommand implements FppCommand {
         if (once) stopAttacking(uuid);
     }
 
-    /** Swing cooldown in ticks for a weapon material - shared with the PVE controller. */
+    /** Swing cooldown in ticks for a weapon material — shared with the PVE controller. */
     public static int getWeaponCooldown(@Nullable Material weapon) {
         if (weapon == null) return DEFAULT_COOLDOWN;
         return WEAPON_COOLDOWN.getOrDefault(weapon, DEFAULT_COOLDOWN);

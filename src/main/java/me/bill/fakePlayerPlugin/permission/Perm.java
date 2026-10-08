@@ -20,6 +20,12 @@ public final class Perm {
 
     public static final String USER_SPAWN = "fpp.spawn.user";
 
+    public static final String SPAWN_RANK = "fpp.spawn.rank";
+
+    public static final String SPAWN_GOD = "fpp.spawn.god";
+
+    public static final String SPAWN_DONUT_CHAT = "fpp.spawn.donutchat";
+
     public static final String BOT_LIMIT_PREFIX = "fpp.spawn.limit.";
 
     public static final String DESPAWN = "fpp.despawn";

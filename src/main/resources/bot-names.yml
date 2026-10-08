@@ -4,10 +4,10 @@
 #
 #  Rules:
 #    • Max 16 characters per name (Minecraft username limit)
-#    • Names are picked at random when spawning bots
-#    • If a name matches a real Mojang account the bot will use that skin
+#    • Names are picked at random when /fpp spawn --random is used
+#    • Names affect bot identity only; skins come from the configured skin pools
 #    • Duplicate names are ignored
-#    • If the list is empty a random "BotXXXX" name is used as fallback
+#    • If the list is empty a random "Bot#######" name is used as fallback
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: []

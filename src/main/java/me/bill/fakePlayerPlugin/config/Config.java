@@ -3,6 +3,7 @@ package me.bill.fakePlayerPlugin.config;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -294,12 +295,31 @@ public final class Config {
         return Math.max(0, cfg.getInt("spawn-cooldown", 0));
     }
 
-    /**
-     * Bots are permanently hidden from the tab list - there is no override mechanism. This is
-     * intentional: bots must never be able to present themselves as a real connected client.
-     */
+    public static int donutChatMinMessagesPerSecond() {
+        return Math.max(1, Math.min(100, cfg.getInt("donut-chat.min-messages-per-second", 10)));
+    }
+
+    public static int donutChatMaxMessagesPerSecond() {
+        int minimum = donutChatMinMessagesPerSecond();
+        return Math.max(minimum, Math.min(100, cfg.getInt("donut-chat.max-messages-per-second", 20)));
+    }
+
+    public static String donutChatFormat() {
+        String format = cfg.getString(
+                "donut-chat.format",
+                "<dark_gray>[BOT]</dark_gray> <gray>{bot}</gray><dark_gray>: </dark_gray><white>{message}</white>");
+        if (format == null || format.isBlank()) format = "<gray>{bot}: {message}</gray>";
+        return format.toLowerCase(Locale.ROOT).contains("[bot]") ? format : "<dark_gray>[BOT]</dark_gray> " + format;
+    }
+
+    public static List<String> donutChatMessages() {
+        return cfg.getStringList("donut-chat.messages").stream()
+                .filter(message -> message != null && !message.isBlank())
+                .toList();
+    }
+
     public static boolean tabListEnabled() {
-        return false;
+        return cfg.getBoolean("tab-list.enabled", true);
     }
 
     public static int maxBots() {
@@ -308,6 +328,19 @@ public final class Config {
 
     public static int userBotLimit() {
         return cfg.getInt("limits.user-bot-limit", 1);
+    }
+
+    public static List<String> spawnCountPresets() {
+        List<String> presets = cfg.getIntegerList("limits.spawn-presets").stream()
+                .filter(value -> value > 0)
+                .distinct()
+                .map(String::valueOf)
+                .toList();
+        return presets.isEmpty() ? List.of("1", "5", "10", "15", "20") : presets;
+    }
+
+    public static int bulkSpawnDelayTicks() {
+        return Math.max(1, cfg.getInt("limits.bulk-spawn-delay-ticks", 5));
     }
 
     // ── Economy / bot rental ────────────────────────────────────────────────────────────────────
@@ -444,7 +477,7 @@ public final class Config {
     }
 
     public static boolean persistOnRestart() {
-        return cfg.getBoolean("persistence.enabled", true);
+        return cfg.getBoolean("persistence.enabled", false);
     }
 
     public static int restoreDelayTicks() {
@@ -731,6 +764,22 @@ public final class Config {
 
     public static double positionSyncDistance() {
         return cfg.getDouble("performance.position-sync-distance", 128.0);
+    }
+
+    public static int performanceMaxBotTicksPerTick() {
+        return Math.max(1, cfg.getInt("performance.max-bot-ticks-per-tick", 256));
+    }
+
+    public static int performanceMaxTabListChecksPerPass() {
+        return Math.max(1, cfg.getInt("performance.max-tab-list-checks-per-pass", 2048));
+    }
+
+    public static int performanceMaxValidationChecksPerPass() {
+        return Math.max(1, cfg.getInt("performance.max-validation-checks-per-pass", 256));
+    }
+
+    public static int performancePlayerSyncBatchSize() {
+        return Math.max(1, cfg.getInt("performance.player-sync-batch-size", 256));
     }
 
     public static boolean isBadwordFilterEnabled() {

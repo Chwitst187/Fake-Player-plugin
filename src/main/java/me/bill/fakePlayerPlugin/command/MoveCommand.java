@@ -26,7 +26,7 @@ import me.bill.fakePlayerPlugin.util.BotAccess;
 
 /**
  * Pathfinding-only bot movement: walk to another bot/player (following live if they move) or to
- * fixed coordinates. Directional raw-input movement was removed - {@code --to}/{@code --coords}
+ * fixed coordinates. Directional raw-input movement was removed — {@code --to}/{@code --coords}
  * cover every real use case and are simpler to reason about.
  */
 public final class MoveCommand implements FppCommand {
@@ -142,7 +142,7 @@ public final class MoveCommand implements FppCommand {
             return true;
         }
 
-        // Resolve the destination once, up front - not per bot in the loop, otherwise a "--to"
+        // Resolve the destination once, up front — not per bot in the loop, otherwise a "--to"
         // target that happens to be one of the "all" bots would abort the whole batch on its own
         // turn (self-target) instead of just being skipped.
         UUID excludeUuid = null;
@@ -294,6 +294,8 @@ public final class MoveCommand implements FppCommand {
      */
     private void startPathfindMove(
             FakePlayer fp, Supplier<Location> destination, String destinationLabel, CommandSender sender) {
+        UUID uuid = fp.getUuid();
+        manager.beginExclusiveAction(uuid, FakePlayerManager.BotAction.MOVE);
         pathfinding.navigate(
                 fp,
                 new PathfindingService.NavigationRequest(
@@ -327,13 +329,7 @@ public final class MoveCommand implements FppCommand {
     }
 
     private void stopMovement(FakePlayer fp) {
-        UUID uuid = fp.getUuid();
-        // Only release the nav slot if /fpp move itself currently owns it - another concurrently
-        // running task (mining, using, finding, PVE) may hold it instead, and stopping *this* bot's
-        // move command must never cancel someone else's navigation.
-        if (pathfinding.isNavigating(uuid, PathfindingService.Owner.MOVE)) {
-            pathfinding.cancel(uuid);
-        }
+        pathfinding.cancel(fp.getUuid());
         FppApiImpl.fireTaskEvent(fp, "move", FppBotTaskEvent.Action.STOP);
     }
 
@@ -344,9 +340,7 @@ public final class MoveCommand implements FppCommand {
     }
 
     public void cleanupBot(@NotNull UUID botUuid) {
-        if (pathfinding.isNavigating(botUuid, PathfindingService.Owner.MOVE)) {
-            pathfinding.cancel(botUuid);
-        }
+        pathfinding.cancel(botUuid);
     }
 
     @Override

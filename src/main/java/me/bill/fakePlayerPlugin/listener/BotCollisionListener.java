@@ -175,6 +175,9 @@ public class BotCollisionListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerMove(PlayerMoveEvent event) {
         if (!Config.bodyPushable()) return;
+        // Folia already handles native player collision in the owning region. A plugin-side
+        // world/entity scan here can cross a region boundary and contend on the regionizer lock.
+        if (NmsPlayerSpawner.isFoliaServer()) return;
         Location from = event.getFrom();
         Location to = event.getTo();
         if (to == null) return;
@@ -187,11 +190,8 @@ public class BotCollisionListener implements Listener {
         Player player = event.getPlayer();
         Location pLoc = player.getLocation();
 
-        for (FakePlayer fp : manager.getActivePlayers()) {
-            Player body = fp.getPlayer();
-            if (body == null || !body.isValid()) continue;
-
-            if (!body.getWorld().equals(player.getWorld())) continue;
+        for (Player body : player.getWorld().getNearbyPlayers(pLoc, walkRadius)) {
+            if (body == player || manager.getByUuid(body.getUniqueId()) == null || !body.isValid()) continue;
             if (!canCollide(player, body)) continue;
 
             Location bLoc = body.getLocation();
@@ -219,6 +219,9 @@ public class BotCollisionListener implements Listener {
 
         Collection<FakePlayer> all = manager.getActivePlayers();
         if (all.size() < 2) return;
+        // At mass scale native entity collision is substantially cheaper than materialising and
+        // comparing the complete bot collection every five ticks.
+        if (all.size() > Config.performanceMaxBotTicksPerTick() * 4) return;
 
         double botRadius = Config.collisionBotRadius();
         double botStrength = Config.collisionBotStrength();

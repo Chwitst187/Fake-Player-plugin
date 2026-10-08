@@ -6,7 +6,7 @@ folia-supported: true
 authors: [ F_PP ]
 description: "Advanced fake player / bot plugin for Paper and Folia 1.21+"
 website: "https://modrinth.com/plugin/fake-player-plugin-(fpp)"
-softdepend: [ PlaceholderAPI, WorldEdit, spark, Vault, ExcellentEconomy ]
+softdepend: [ PlaceholderAPI, WorldEdit, LuckPerms, TAB, Phoenix, Bolt, Retention, packetevents, GrimAC, spark, Vault, ExcellentEconomy ]
 
 commands:
   fpp:
@@ -67,6 +67,9 @@ permissions:
       fpp.plugininfo:           true
       fpp.help:                 true
       fpp.spawn:                true
+      fpp.spawn.rank:           true
+      fpp.spawn.god:            true
+      fpp.spawn.donutchat:      true
       fpp.despawn:              true
       fpp.despawn.bulk:         true
       fpp.despawn.own:          true
@@ -166,8 +169,28 @@ permissions:
 
   fpp.spawn:
     description: >
-      Admin spawn - ignores personal bot limits. Spawns one bot per command
-      (auto-named or --name) at the commanding player's own location.
+      Admin spawn - ignores personal bot limits. Supports --count for multiple
+      bots, --random for random names, --world for a target world, --randompos
+      for safe random positions, --location for fixed targeting, or --name for
+      one custom-named bot.
+    default: op
+    children:
+      fpp.spawn.rank: true
+      fpp.spawn.god: true
+      fpp.spawn.donutchat: true
+
+  fpp.spawn.rank:
+    description: >
+      Allow --rank on /fpp spawn. Phoenix ranks are used when Phoenix is ready;
+      otherwise LuckPerms groups are used. Bot memberships are session-only.
+    default: op
+
+  fpp.spawn.god:
+    description: Allow --god on /fpp spawn to make spawned bots invulnerable.
+    default: op
+
+  fpp.spawn.donutchat:
+    description: Allow --donutchat on /fpp spawn to enable canned trade chat for the spawned bots.
     default: op
 
   fpp.spawn.user:

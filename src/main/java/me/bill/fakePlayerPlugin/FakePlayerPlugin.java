@@ -4,6 +4,7 @@ import java.io.File;
 import java.util.UUID;
 
 import org.bukkit.Bukkit;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import me.bill.fakePlayerPlugin.api.FppApi;
@@ -41,8 +42,10 @@ import me.bill.fakePlayerPlugin.config.BotNameConfig;
 import me.bill.fakePlayerPlugin.config.Config;
 import me.bill.fakePlayerPlugin.database.DatabaseManager;
 import me.bill.fakePlayerPlugin.economy.EconomyManager;
+import me.bill.fakePlayerPlugin.fakeplayer.BoltProfileHook;
 import me.bill.fakePlayerPlugin.fakeplayer.BotPersistence;
 import me.bill.fakePlayerPlugin.fakeplayer.ChunkLoader;
+import me.bill.fakePlayerPlugin.fakeplayer.DonutChatController;
 import me.bill.fakePlayerPlugin.fakeplayer.FakePlayerManager;
 import me.bill.fakePlayerPlugin.fakeplayer.PathfindingService;
 import me.bill.fakePlayerPlugin.fakeplayer.PveController;
@@ -51,6 +54,7 @@ import me.bill.fakePlayerPlugin.fakeplayer.RemoteBotEntry;
 import me.bill.fakePlayerPlugin.fakeplayer.RentalService;
 import me.bill.fakePlayerPlugin.fakeplayer.SkinManager;
 import me.bill.fakePlayerPlugin.fakeplayer.SkinPoolService;
+import me.bill.fakePlayerPlugin.fakeplayer.VoiceChatHook;
 import me.bill.fakePlayerPlugin.gui.BotListGui;
 import me.bill.fakePlayerPlugin.gui.BotSettingGui;
 import me.bill.fakePlayerPlugin.gui.HelpGui;
@@ -72,8 +76,6 @@ import me.bill.fakePlayerPlugin.perf.FppProfiler;
 import me.bill.fakePlayerPlugin.perf.PerformanceMonitor;
 import me.bill.fakePlayerPlugin.perf.PerformanceReportExporter;
 import me.bill.fakePlayerPlugin.sync.ConfigSyncManager;
-import me.bill.fakePlayerPlugin.util.AttributionApiManager;
-import me.bill.fakePlayerPlugin.util.AttributionManager;
 import me.bill.fakePlayerPlugin.util.BackupManager;
 import me.bill.fakePlayerPlugin.util.BadwordFilter;
 import me.bill.fakePlayerPlugin.util.CompatibilityChecker;
@@ -126,6 +128,7 @@ public final class FakePlayerPlugin extends JavaPlugin {
     private SkinPoolService skinPoolService;
     private PveController pveController;
     private me.bill.fakePlayerPlugin.fakeplayer.AutoEatController autoEatController;
+    private DonutChatController donutChatController;
     private EconomyManager economyManager;
     private RentalService rentalService;
     private HeartbeatSender heartbeatSender;
@@ -186,9 +189,6 @@ public final class FakePlayerPlugin extends JavaPlugin {
 
         profiler = new BuiltinFppProfiler(Config.performanceSelfProfilerMethodLevel());
         if (Config.performanceSelfProfilerEnabled()) profiler.start();
-
-        AttributionManager.validate(this);
-        AttributionApiManager.init(this);
 
         BadwordFilter.reload(this);
         if (Config.isBadwordFilterEnabled() && BadwordFilter.getBadwordCount() == 0) {
@@ -309,6 +309,9 @@ public final class FakePlayerPlugin extends JavaPlugin {
         rentalService = new RentalService(this, fakePlayerManager);
         rentalService.start();
 
+        donutChatController = new DonutChatController(this, fakePlayerManager);
+        donutChatController.start();
+
         commandManager = new CommandManager(this);
         commandManager.register(new RentCommand(this, fakePlayerManager));
         commandManager.register(new SpawnCommand(fakePlayerManager));
@@ -405,8 +408,8 @@ public final class FakePlayerPlugin extends JavaPlugin {
                         fakePlayerManager.validateEntities();
                     }
                 },
-                6000L,
-                6000L);
+                20L,
+                20L);
 
         int configIssues = ConfigValidator.validate();
         if (configIssues > 0) {
@@ -426,6 +429,15 @@ public final class FakePlayerPlugin extends JavaPlugin {
         if (worldEditAvailable) {
             Config.debugStartup("WorldEdit detected - --wesel flag enabled for /fpp mine and /fpp place.");
         }
+
+        Plugin luckPermsPlugin = getServer().getPluginManager().getPlugin("LuckPerms");
+        Plugin phoenixPlugin = getServer().getPluginManager().getPlugin("Phoenix");
+        Plugin packetEventsPlugin = getServer().getPluginManager().getPlugin("packetevents");
+        boolean luckPermsFound = luckPermsPlugin != null && luckPermsPlugin.isEnabled();
+        boolean phoenixFound = phoenixPlugin != null && phoenixPlugin.isEnabled();
+        boolean packetEventsFound = packetEventsPlugin != null && packetEventsPlugin.isEnabled();
+        BoltProfileHook.HookState boltHookState = BoltProfileHook.initialize(this);
+        VoiceChatHook.HookState voiceChatHook = VoiceChatHook.initialize(this);
 
         UpdateChecker.check(this);
 
@@ -471,10 +483,24 @@ public final class FakePlayerPlugin extends JavaPlugin {
                 dbSchemaVersion,
                 Config.persistOnRestart(),
                 effectiveTaskPersist,
-                false, // LuckPerms integration removed
+                luckPermsFound,
+                describeHookPlugin(luckPermsPlugin),
+                phoenixFound,
+                describeHookPlugin(phoenixPlugin),
+                boltHookState.active(),
+                describeHookPlugin(boltHookState.plugin()),
+                packetEventsFound,
+                describeHookPlugin(packetEventsPlugin),
                 effectiveChunkLoading,
                 Config.maxBots(),
                 fppMetrics != null && fppMetrics.isActive(),
+                voiceChatHook.detected(),
+                voiceChatHook.active(),
+                (voiceChatHook.plugin() == null
+                        ? "not installed"
+                        : (voiceChatHook.active()
+                                ? describeHookPlugin(voiceChatHook.plugin())
+                                : describeHookPlugin(voiceChatHook.plugin()) + " - activation failed")),
                 configVersion,
                 backupCount,
                 startupMs);
@@ -498,6 +524,7 @@ public final class FakePlayerPlugin extends JavaPlugin {
         if (pveController != null) pveController.shutdown();
         if (autoEatController != null) autoEatController.shutdown();
         if (rentalService != null) rentalService.shutdown();
+        if (donutChatController != null) donutChatController.shutdown();
 
         if (pathfindingService != null) pathfindingService.cancelAll();
 
@@ -599,6 +626,14 @@ public final class FakePlayerPlugin extends JavaPlugin {
         return botAuthManager;
     }
 
+    public EconomyManager getEconomyManager() {
+        return economyManager;
+    }
+
+    public RentalService getRentalService() {
+        return rentalService;
+    }
+
     public VelocityChannel getVelocityChannel() {
         return velocityChannel;
     }
@@ -617,14 +652,6 @@ public final class FakePlayerPlugin extends JavaPlugin {
 
     public me.bill.fakePlayerPlugin.fakeplayer.AutoEatController getAutoEatController() {
         return autoEatController;
-    }
-
-    public EconomyManager getEconomyManager() {
-        return economyManager;
-    }
-
-    public RentalService getRentalService() {
-        return rentalService;
     }
 
     public XpCommand getXpCommand() {
@@ -685,6 +712,18 @@ public final class FakePlayerPlugin extends JavaPlugin {
 
     public void setUpdateNotification(Component c) {
         this.updateNotificationMessage = c;
+    }
+
+    private static String describeHookPlugin(Plugin plugin) {
+        if (plugin == null) return "not installed";
+
+        var authors = plugin.getDescription().getAuthors();
+        String authorText = "unknown";
+        if (authors != null && !authors.isEmpty()) {
+            authorText = String.join(", ", authors);
+        }
+
+        return plugin.getName() + " (" + authorText + ")";
     }
 
     private volatile String latestKnownVersion = null;

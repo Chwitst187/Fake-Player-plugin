@@ -25,7 +25,7 @@ public final class FppScheduler {
 
     /**
      * Once a plugin is disabled, Folia's region schedulers reject any new task registration
-     * ({@code IllegalPluginAccessException}) - but by the time {@code onDisable()} runs, Folia has
+     * ({@code IllegalPluginAccessException}) — but by the time {@code onDisable()} runs, Folia has
      * already halted all region ticking, so it's both safe and necessary to just run the work
      * directly instead of scheduling it.
      */
@@ -39,8 +39,10 @@ public final class FppScheduler {
             runnable.run();
             return;
         }
-        String section = plugin instanceof FakePlayerPlugin ? "scheduler.runAtEntity" : null;
-        entity.getScheduler().run(plugin, ignored -> profileRun(section, runnable), null);
+        // execute accepts the Runnable directly. The previous run(...) adapter allocated a
+        // capturing Consumer for every per-bot tick and made Spark attribute all underlying work
+        // to FppScheduler.lambda$runAtEntity$0.
+        entity.getScheduler().execute(plugin, runnable, null, 1L);
     }
 
     public static int runAtEntityRepeatingWithId(
@@ -78,8 +80,7 @@ public final class FppScheduler {
             runnable.run();
             return;
         }
-        String section = plugin instanceof FakePlayerPlugin ? "scheduler.runAtLocation" : null;
-        Bukkit.getRegionScheduler().run(plugin, location, ignored -> profileRun(section, runnable));
+        Bukkit.getRegionScheduler().execute(plugin, location, runnable);
     }
 
     public static void runAtChunk(Plugin plugin, World world, int chunkX, int chunkZ, Runnable runnable) {
@@ -91,8 +92,7 @@ public final class FppScheduler {
             runnable.run();
             return;
         }
-        String section = plugin instanceof FakePlayerPlugin ? "scheduler.runAtChunk" : null;
-        Bukkit.getRegionScheduler().run(plugin, world, chunkX, chunkZ, ignored -> profileRun(section, runnable));
+        Bukkit.getRegionScheduler().execute(plugin, world, chunkX, chunkZ, runnable);
     }
 
     public static void runSync(Plugin plugin, Runnable runnable) {
@@ -100,8 +100,7 @@ public final class FppScheduler {
             runnable.run();
             return;
         }
-        String section = plugin instanceof FakePlayerPlugin ? "scheduler.runSync" : null;
-        Bukkit.getGlobalRegionScheduler().run(plugin, ignored -> profileRun(section, runnable));
+        Bukkit.getGlobalRegionScheduler().execute(plugin, runnable);
     }
 
     public static void runSyncRepeating(Plugin plugin, Runnable runnable, long delayTicks, long periodTicks) {

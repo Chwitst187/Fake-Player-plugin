@@ -1,6 +1,10 @@
 package me.bill.fakePlayerPlugin;
 
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
 public final class Launcher {
+    private static final Logger LOGGER = Logger.getLogger(Launcher.class.getName());
 
     private Launcher() {}
 
@@ -13,7 +17,7 @@ public final class Launcher {
                 }
             }
         } catch (Exception e) {
-            System.err.println("Could not open browser: " + e.getMessage());
+            LOGGER.log(Level.WARNING, "Could not open browser.", e);
         }
         System.exit(0);
     }

@@ -21,6 +21,7 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import me.bill.fakePlayerPlugin.util.BotDataYaml;
+import me.bill.fakePlayerPlugin.util.FppLogger;
 
 public final class StorageStore {
 
@@ -60,7 +61,7 @@ public final class StorageStore {
                     });
                     if (file.exists()) file.delete();
                 } catch (IOException ex) {
-                    plugin.getLogger().warning("[FPP] Failed to migrate storages.yml: " + ex.getMessage());
+                    FppLogger.error("Failed to migrate storages.yml: " + ex.getMessage());
                 }
             }
         }

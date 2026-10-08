@@ -27,4 +27,14 @@ class FoliaCompatibilityTest {
                 scheduler.contains("Bukkit.getScheduler()"),
                 "FppScheduler must route tasks through Folia-compatible schedulers");
     }
+
+    @Test
+    void immediateSchedulerPathsDoNotAllocateConsumerAdapters() throws Exception {
+        String scheduler = Files.readString(Path.of("src/main/java/me/bill/fakePlayerPlugin/util/FppScheduler.java"));
+
+        assertTrue(scheduler.contains("entity.getScheduler().execute(plugin, runnable, null, 1L)"));
+        assertTrue(scheduler.contains("Bukkit.getRegionScheduler().execute(plugin, location, runnable)"));
+        assertFalse(scheduler.contains("scheduler.runAtEntity\" : null"));
+        assertFalse(scheduler.contains("scheduler.runAtLocation\" : null"));
+    }
 }

@@ -9,7 +9,7 @@
 # Do not edit config-version manually. It is used by the automatic config
 # migrator to safely add new defaults during plugin upgrades.
 # ═══════════════════════════════════════════════════════════════════════════════
-config-version: 74
+config-version: 82
 language: en
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -24,8 +24,44 @@ limits:
   max-bots: 1000
   user-bot-limit: 1
   spawn-presets: [1, 5, 10, 15, 20]
+  bulk-spawn-delay-ticks: 5
 
 spawn-cooldown: 0
+
+# Opt-in chat used only by bots spawned with /fpp spawn --donutchat.
+# The [BOT] marker in the default format keeps synthetic messages identifiable.
+# A new total rate is chosen every second and spread evenly over the server ticks.
+# Available placeholders: {bot}, {display_name}, {message}.
+donut-chat:
+  min-messages-per-second: 10
+  max-messages-per-second: 20
+  format: '<dark_gray>[BOT]</dark_gray> <gray>{bot}</gray><dark_gray>: </dark_gray><white>{message}</white>'
+  messages:
+    - 'buying spawners /msg me'
+    - 'selling netherite cheap'
+    - 'anyone selling shulkers?'
+    - 'buying totems paying good'
+    - 'who wants to team?'
+    - 'selling elytra /msg me'
+    - 'shop restocked'
+    - 'anyone got spare rockets?'
+    - 'buying keys in bulk'
+    - 'looking for a base partner'
+    - 'buying dragon eggs /msg me'
+    - 'selling maxed armor cheap'
+    - 'anyone selling obsidian?'
+    - 'trading keys for money'
+    - 'need a teammate with vc'
+    - 'selling rockets in bulk'
+    - 'buying beacons paying good'
+    - 'visit my shop for deals'
+    - 'anyone got a spare kit?'
+    - 'paying well for a builder'
+
+# Show fake players in the normal player list. Their skin, display name and
+# configured/simulated ping are kept in sync while they are active.
+tab-list:
+  enabled: true
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ECONOMY / BOT RENTAL
@@ -77,12 +113,13 @@ economy:
 # ═══════════════════════════════════════════════════════════════════════════════
 # RESTART PERSISTENCE
 # ═══════════════════════════════════════════════════════════════════════════════
-# When enabled, active bots are saved and restored after server restart/reload.
+# Disabled by default: active bots do not return after a server restart/reload.
+# Set enabled to true only when automatic restart restoration is explicitly wanted.
 # restore-delay-ticks can delay restoration until worlds/plugins finish loading.
 # restore-batch-size controls how many bots are restored per batch.
 # ═══════════════════════════════════════════════════════════════════════════════
 persistence:
-  enabled: true
+  enabled: false
   restore-delay-ticks: 0
   restore-batch-size: 1
 
@@ -225,7 +262,8 @@ death:
 # CHUNK LOADING
 # ═══════════════════════════════════════════════════════════════════════════════
 # Keeps chunks around active bots loaded.
-# radius: auto uses the server simulation distance; 0 uses only the bot chunk.
+# radius: auto uses the server simulation distance; Folia is safety-capped to 1 (3x3 chunks per bot).
+# 0 disables explicit bot chunk tickets.
 # mass-disable-threshold: 0 disables automatic mass-spawn ticket protection.
 # ═══════════════════════════════════════════════════════════════════════════════
 chunk-loading:
@@ -381,6 +419,10 @@ performance:
     method-level: false
     export-on-warning: true
   position-sync-distance: 128.0
+  max-bot-ticks-per-tick: 256
+  max-tab-list-checks-per-pass: 2048
+  max-validation-checks-per-pass: 256
+  player-sync-batch-size: 256
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # UPDATE CHECKER

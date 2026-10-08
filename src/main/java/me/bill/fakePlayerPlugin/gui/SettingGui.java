@@ -40,11 +40,11 @@ import me.bill.fakePlayerPlugin.fakeplayer.FakePlayerManager;
 import me.bill.fakePlayerPlugin.fakeplayer.NmsPlayerSpawner;
 import me.bill.fakePlayerPlugin.fakeplayer.pathfinding.PathfindingDebugManager;
 import me.bill.fakePlayerPlugin.permission.Perm;
-import me.bill.fakePlayerPlugin.util.AttributionManager;
 import me.bill.fakePlayerPlugin.util.FppScheduler;
 
 import io.papermc.paper.event.player.AsyncChatEvent;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
@@ -94,11 +94,7 @@ public final class SettingGui implements Listener {
 
     public SettingGui(FakePlayerPlugin plugin) {
         this.plugin = plugin;
-        this.categories = new Category[] {general(), body(), auth(), perf(), debug()};
-
-        if (!AttributionManager.quickAuthorCheck()) {
-            // Attribution integrity check failed - silently continuing.
-        }
+        this.categories = new Category[] {general(), body(), debug()};
     }
 
     public void open(Player player) {
@@ -418,16 +414,6 @@ public final class SettingGui implements Listener {
                     }
                     cfg.set(entry.configKey, val);
                 }
-                case STRING -> {
-                    if (raw.isBlank()) {
-                        player.sendMessage(Component.empty()
-                                .decoration(TextDecoration.ITALIC, false)
-                                .append(Component.text("✘ ").color(OFF_RED))
-                                .append(Component.text("ᴠᴀʟᴜᴇ ᴄᴀɴ'ᴛ ʙᴇ ᴇᴍᴘᴛʏ.").color(GRAY)));
-                        return false;
-                    }
-                    cfg.set(entry.configKey, raw);
-                }
                 default -> {
                     return false;
                 }
@@ -716,10 +702,10 @@ public final class SettingGui implements Listener {
         meta.lore(List.of(
                 Component.empty()
                         .decoration(TextDecoration.ITALIC, false)
-                        .append(Component.text("ᴄʟɪᴄᴋ - ꜱᴀᴠᴇ & ᴄʟᴏꜱᴇ").color(DARK_GRAY)),
+                        .append(Component.text("ᴄʟɪᴄᴋ — ꜱᴀᴠᴇ & ᴄʟᴏꜱᴇ").color(DARK_GRAY)),
                 Component.empty()
                         .decoration(TextDecoration.ITALIC, false)
-                        .append(Component.text("ꜱʜɪꜰᴛ-ᴄʟɪᴄᴋ - ꜱᴀᴠᴇ & ᴏᴘᴇɴ ᴛʜᴇ ʙᴏᴛ ʟɪꜱᴛ")
+                        .append(Component.text("ꜱʜɪꜰᴛ-ᴄʟɪᴄᴋ — ꜱᴀᴠᴇ & ᴏᴘᴇɴ ᴛʜᴇ ʙᴏᴛ ʟɪꜱᴛ")
                                 .color(DARK_GRAY))));
         item.setItemMeta(meta);
         return item;
@@ -788,8 +774,6 @@ public final class SettingGui implements Listener {
                             defaults != null
                                     ? defaults.getDouble(entry.configKey, entry.dblValues[0])
                                     : entry.dblValues[0]);
-                    case STRING -> cfg.set(
-                            entry.configKey, defaults != null ? defaults.getString(entry.configKey, "") : "");
                     default -> {}
                 }
             }
@@ -815,34 +799,6 @@ public final class SettingGui implements Listener {
 
     private void applyLiveEffect(String configKey) {
         FakePlayerManager fpm = plugin.getFakePlayerManager();
-
-        if (configKey.startsWith("performance.self-profiler")) {
-            var profiler = plugin.getBuiltinProfiler();
-            if (profiler != null) {
-                if (Config.performanceSelfProfilerEnabled()) profiler.start();
-                else profiler.stop();
-                profiler.setMethodLevelEnabled(Config.performanceSelfProfilerMethodLevel());
-            }
-            return;
-        }
-
-        if (configKey.startsWith("performance.")) {
-            // Every performance.* key (interval, thresholds, spark toggle, ...) is only read at
-            // PerformanceMonitor#start() time, so a plain stop()+start() picks up whatever changed -
-            // start() itself checks performance.enabled and no-ops if it's now off.
-            var monitor = plugin.getPerformanceMonitor();
-            if (monitor != null) {
-                monitor.stop();
-                monitor.start();
-            }
-            return;
-        }
-
-        if (configKey.startsWith("auth.")) {
-            // Nothing to restart live - auth.* is read fresh on every bot join (see
-            // BotAuthManager#handleBotJoin), so a config change only affects the *next* join.
-            return;
-        }
 
         if (configKey.equals("body.pushable")
                 || configKey.equals("body.damageable")
@@ -1046,7 +1002,7 @@ public final class SettingGui implements Listener {
         if ("reset-all-bots".equals(key)) {
             int count = plugin.getFakePlayerManager().getActivePlayers().size();
             plugin.getFakePlayerManager().removeAll();
-            player.sendMessage(Component.text("Reset " + count + " active bot(s).", YELLOW)
+            player.sendMessage(Component.text("Reset " + count + " active bot(s).", NamedTextColor.YELLOW)
                     .decoration(TextDecoration.ITALIC, false));
         }
     }
@@ -1117,152 +1073,6 @@ public final class SettingGui implements Listener {
                                 new int[] {1, 5, 10, 15, 20, 40, 60, 100})));
     }
 
-    private Category auth() {
-        return new Category(
-                "🔐 ᴀᴜᴛʜ",
-                Material.TRIPWIRE_HOOK,
-                Material.STRING,
-                Material.PURPLE_STAINED_GLASS_PANE,
-                List.of(
-                        SettingEntry.toggle(
-                                "auth.enabled",
-                                "ᴇɴᴀʙʟᴇ ᴀᴜᴛʜ",
-                                "ʙᴏᴛꜱ ᴀᴜᴛᴏ-ʀᴇɢɪꜱᴛᴇʀ/ʟᴏɢɪɴ ᴀɢᴀɪɴꜱᴛ ᴀɴ\nɪɴꜱᴛᴀʟʟᴇᴅ ʟᴏɢɪɴ ᴘʟᴜɢɪɴ. ɴᴇᴇᴅꜱ\nᴅᴀᴛᴀʙᴀꜱᴇ.ᴇɴᴀʙʟᴇᴅ ᴛᴏ ʀᴇᴍᴇᴍʙᴇʀ ᴘᴀꜱꜱᴡᴏʀᴅꜱ.",
-                                Material.TRIPWIRE_HOOK),
-                        SettingEntry.text(
-                                "auth.register-command",
-                                "ʀᴇɢɪꜱᴛᴇʀ ᴄᴏᴍᴍᴀɴᴅ",
-                                "ꜱᴇɴᴛ ᴀꜱ ᴛʜᴇ ʙᴏᴛ ᴏɴ ɪᴛꜱ ꜰɪʀꜱᴛ ᴊᴏɪɴ.\n%password% ɪꜱ ʀᴇᴘʟᴀᴄᴇᴅ ᴡɪᴛʜ ɪᴛꜱ\nɢᴇɴᴇʀᴀᴛᴇᴅ ᴘᴀꜱꜱᴡᴏʀᴅ. ɴᴏ ʟᴇᴀᴅɪɴɢ ꜱʟᴀꜱʜ.",
-                                Material.WRITABLE_BOOK),
-                        SettingEntry.text(
-                                "auth.login-command",
-                                "ʟᴏɢɪɴ ᴄᴏᴍᴍᴀɴᴅ",
-                                "ꜱᴇɴᴛ ᴀꜱ ᴛʜᴇ ʙᴏᴛ ᴏɴ ᴇᴠᴇʀʏ ʟᴀᴛᴇʀ ᴊᴏɪɴ,\nᴡɪᴛʜ ɪᴛꜱ ʀᴇᴍᴇᴍʙᴇʀᴇᴅ ᴘᴀꜱꜱᴡᴏʀᴅ.\nɴᴏ ʟᴇᴀᴅɪɴɢ ꜱʟᴀꜱʜ.",
-                                Material.WRITTEN_BOOK),
-                        SettingEntry.cycleInt(
-                                "auth.delay-min-ticks",
-                                "ᴍɪɴ ᴅᴇʟᴀʏ (ᴛɪᴄᴋꜱ)",
-                                "ꜱʜᴏʀᴛᴇꜱᴛ ʀᴀɴᴅᴏᴍ ᴅᴇʟᴀʏ ʙᴇꜰᴏʀᴇ ᴛʜᴇ\nʀᴇɢɪꜱᴛᴇʀ/ʟᴏɢɪɴ ᴄᴏᴍᴍᴀɴᴅ ꜰɪʀᴇꜱ.\n20 = 1 ꜱᴇᴄᴏɴᴅ.",
-                                Material.CLOCK,
-                                new int[] {0, 10, 20, 40, 60}),
-                        SettingEntry.cycleInt(
-                                "auth.delay-max-ticks",
-                                "ᴍᴀx ᴅᴇʟᴀʏ (ᴛɪᴄᴋꜱ)",
-                                "ʟᴏɴɢᴇꜱᴛ ʀᴀɴᴅᴏᴍ ᴅᴇʟᴀʏ ʙᴇꜰᴏʀᴇ ᴛʜᴇ\nʀᴇɢɪꜱᴛᴇʀ/ʟᴏɢɪɴ ᴄᴏᴍᴍᴀɴᴅ ꜰɪʀᴇꜱ.\n60 = 3 ꜱᴇᴄᴏɴᴅꜱ.",
-                                Material.CLOCK,
-                                new int[] {20, 40, 60, 100, 200}),
-                        SettingEntry.cycleInt(
-                                "auth.pending-timeout-ticks",
-                                "ᴘᴇɴᴅɪɴɢ ᴛɪᴍᴇᴏᴜᴛ (ᴛɪᴄᴋꜱ)",
-                                "ʜᴀʀᴅ ᴄᴀᴘ ᴏɴ ʜᴏᴡ ʟᴏɴɢ ᴀ ʙᴏᴛ ꜱᴛᴀʏꜱ\nꜰʀᴏᴢᴇɴ ᴡᴀɪᴛɪɴɢ ꜰᴏʀ ɪᴛꜱ ᴏᴜᴛᴄᴏᴍᴇ.\n100 = 5 ꜱᴇᴄᴏɴᴅꜱ.",
-                                Material.REPEATER,
-                                new int[] {40, 60, 100, 200, 400}),
-                        SettingEntry.cycleInt(
-                                "auth.password.length",
-                                "ᴘᴀꜱꜱᴡᴏʀᴅ ʟᴇɴɢᴛʜ",
-                                "ɢᴇɴᴇʀᴀᴛᴇᴅ ᴘᴀꜱꜱᴡᴏʀᴅ ᴄʜᴀʀᴀᴄᴛᴇʀ ᴄᴏᴜɴᴛ.\nꜱᴛᴀʏ ᴜɴᴅᴇʀ ʏᴏᴜʀ ʟᴏɢɪɴ ᴘʟᴜɢɪɴ'ꜱ\nᴍᴀx-ʟᴇɴɢᴛʜ ᴘᴏʟɪᴄʏ ɪꜰ ɪᴛ ʜᴀꜱ ᴏɴᴇ.",
-                                Material.NAME_TAG,
-                                new int[] {8, 10, 12, 16, 24}),
-                        SettingEntry.toggle(
-                                "auth.password.uppercase",
-                                "ᴘᴀꜱꜱᴡᴏʀᴅ: ᴜᴘᴘᴇʀᴄᴀꜱᴇ",
-                                "ɪɴᴄʟᴜᴅᴇ ᴜᴘᴘᴇʀᴄᴀꜱᴇ ʟᴇᴛᴛᴇʀꜱ.",
-                                Material.PAPER),
-                        SettingEntry.toggle(
-                                "auth.password.lowercase",
-                                "ᴘᴀꜱꜱᴡᴏʀᴅ: ʟᴏᴡᴇʀᴄᴀꜱᴇ",
-                                "ɪɴᴄʟᴜᴅᴇ ʟᴏᴡᴇʀᴄᴀꜱᴇ ʟᴇᴛᴛᴇʀꜱ.",
-                                Material.PAPER),
-                        SettingEntry.toggle(
-                                "auth.password.digits", "ᴘᴀꜱꜱᴡᴏʀᴅ: ᴅɪɢɪᴛꜱ", "ɪɴᴄʟᴜᴅᴇ ɴᴜᴍʙᴇʀꜱ.", Material.PAPER),
-                        SettingEntry.toggle(
-                                "auth.password.symbols",
-                                "ᴘᴀꜱꜱᴡᴏʀᴅ: ꜱʏᴍʙᴏʟꜱ",
-                                "ɪɴᴄʟᴜᴅᴇ ꜱʏᴍʙᴏʟꜱ (!@#%^&*-_=+).",
-                                Material.PAPER)));
-    }
-
-    private Category perf() {
-        return new Category(
-                "📈 ᴘᴇʀꜰ",
-                Material.SPYGLASS,
-                Material.CLOCK,
-                Material.CYAN_STAINED_GLASS_PANE,
-                List.of(
-                        SettingEntry.toggle(
-                                "performance.enabled",
-                                "ᴇɴᴀʙʟᴇ ᴍᴏɴɪᴛᴏʀ",
-                                "ᴡᴀᴛᴄʜᴇꜱ ꜱᴇʀᴠᴇʀ ʜᴇᴀʟᴛʜ (ᴛᴘꜱ, ᴀɴᴅ\nᴍꜱᴘᴛ/ᴄᴘᴜ/ɢᴄ ɪꜰ ꜱᴘᴀʀᴋ ɪꜱ ɪɴꜱᴛᴀʟʟᴇᴅ)\nᴀɴᴅ ᴡᴀʀɴꜱ ɪɴ ᴄᴏɴꜱᴏʟᴇ ᴏɴ ᴛʀᴏᴜʙʟᴇ.",
-                                Material.SPYGLASS),
-                        SettingEntry.toggle(
-                                "performance.spark-enabled",
-                                "ꜱᴘᴀʀᴋ ɪɴᴛᴇɢʀᴀᴛɪᴏɴ",
-                                "ᴜꜱᴇꜱ ᴀɴ ɪɴꜱᴛᴀʟʟᴇᴅ ꜱᴘᴀʀᴋ ꜰᴏʀ ᴍꜱᴘᴛ/ᴄᴘᴜ/ɢᴄ\nᴅᴀᴛᴀ ᴀɴᴅ ᴇɴᴀʙʟᴇꜱ /ꜰᴘᴘ ᴘᴇʀꜰ ꜱᴘᴀʀᴋ'ꜱ\nᴄᴘᴜ ᴘʀᴏꜰɪʟᴇʀ.",
-                                Material.OBSERVER),
-                        SettingEntry.toggle(
-                                "performance.placeholders",
-                                "ᴘʟᴀᴄᴇʜᴏʟᴅᴇʀꜱ",
-                                "ᴇxᴘᴏꜱᴇꜱ ᴘᴇʀꜰᴏʀᴍᴀɴᴄᴇ ᴅᴀᴛᴀ ᴛʜʀᴏᴜɢʜ\nᴘʟᴀᴄᴇʜᴏʟᴅᴇʀᴀᴘɪ (%fpp_tps%, ᴇᴛᴄ.).",
-                                Material.PAPER),
-                        SettingEntry.cycleInt(
-                                "performance.sample-interval-ticks",
-                                "ꜱᴀᴍᴘʟᴇ ɪɴᴛᴇʀᴠᴀʟ (ᴛɪᴄᴋꜱ)",
-                                "ʜᴏᴡ ᴏꜰᴛᴇɴ ᴀ ꜱɴᴀᴘꜱʜᴏᴛ ɪꜱ ᴛᴀᴋᴇɴ.\n20 = 1 ꜱᴇᴄᴏɴᴅ.",
-                                Material.CLOCK,
-                                new int[] {20, 40, 60, 100, 200}),
-                        SettingEntry.cycleInt(
-                                "performance.history-minutes",
-                                "ʜɪꜱᴛᴏʀʏ (ᴍɪɴᴜᴛᴇꜱ)",
-                                "ʜᴏᴡ ʟᴏɴɢ ꜱᴀᴍᴘʟᴇꜱ ᴀʀᴇ ᴋᴇᴘᴛ ꜰᴏʀ\n/ꜰᴘᴘ ᴘᴇʀꜰ ʜɪꜱᴛᴏʀʏ.",
-                                Material.BOOK,
-                                new int[] {5, 10, 15, 30, 60}),
-                        SettingEntry.cycleDouble(
-                                "performance.warn-mspt",
-                                "ᴡᴀʀɴ ᴍꜱᴘᴛ",
-                                "ᴄᴏɴꜱᴏʟᴇ ᴡᴀʀɴɪɴɢ ᴛʜʀᴇꜱʜᴏʟᴅ ꜰᴏʀ\nᴍꜱ-ᴘᴇʀ-ᴛɪᴄᴋ (ɴᴇᴇᴅꜱ ꜱᴘᴀʀᴋ).",
-                                Material.REDSTONE_TORCH,
-                                new double[] {40.0, 50.0, 60.0, 80.0, 100.0}),
-                        SettingEntry.cycleDouble(
-                                "performance.warn-tps",
-                                "ᴡᴀʀɴ ᴛᴘꜱ",
-                                "ᴄᴏɴꜱᴏʟᴇ ᴡᴀʀɴɪɴɢ ᴛʜʀᴇꜱʜᴏʟᴅ ꜰᴏʀ\nᴛɪᴄᴋꜱ-ᴘᴇʀ-ꜱᴇᴄᴏɴᴅ ᴅʀᴏᴘᴘɪɴɢ ʙᴇʟᴏᴡ.",
-                                Material.REDSTONE_TORCH,
-                                new double[] {15.0, 16.0, 18.0, 19.0}),
-                        SettingEntry.cycleInt(
-                                "performance.warn-consecutive-samples",
-                                "ᴡᴀʀɴ ꜱᴀᴍᴘʟᴇꜱ",
-                                "ᴄᴏɴꜱᴇᴄᴜᴛɪᴠᴇ ʙᴀᴅ ꜱᴀᴍᴘʟᴇꜱ ʙᴇꜰᴏʀᴇ\nᴀ ᴡᴀʀɴɪɴɢ ꜰɪʀᴇꜱ. ᴀᴠᴏɪᴅꜱ ᴏɴᴇ-ᴏꜰꜰ ʟᴀɢ ꜱᴘɪᴋᴇꜱ.",
-                                Material.TARGET,
-                                new int[] {1, 2, 3, 5, 10}),
-                        SettingEntry.cycleInt(
-                                "performance.warn-cooldown-minutes",
-                                "ᴡᴀʀɴ ᴄᴏᴏʟᴅᴏᴡɴ (ᴍɪɴ)",
-                                "ᴍɪɴɪᴍᴜᴍ ᴛɪᴍᴇ ʙᴇᴛᴡᴇᴇɴ ʀᴇᴘᴇᴀᴛ\nᴄᴏɴꜱᴏʟᴇ ᴡᴀʀɴɪɴɢꜱ.",
-                                Material.CLOCK,
-                                new int[] {1, 3, 5, 10, 30}),
-                        SettingEntry.cycleInt(
-                                "performance.auto-profiler-timeout-seconds",
-                                "ᴀᴜᴛᴏ-ᴘʀᴏꜰɪʟᴇʀ ᴛɪᴍᴇᴏᴜᴛ (ꜱ)",
-                                "ᴍᴀx ʀᴜɴᴛɪᴍᴇ ꜰᴏʀ ᴀ ꜱᴘᴀʀᴋ ᴘʀᴏꜰɪʟᴇ ꜱᴇꜱꜱɪᴏɴ\nᴀᴜᴛᴏ-ꜱᴛᴀʀᴛᴇᴅ ᴏɴ ᴀ ᴡᴀʀɴɪɴɢ.",
-                                Material.MAGMA_CREAM,
-                                new int[] {30, 60, 90, 120}),
-                        SettingEntry.toggle(
-                                "performance.self-profiler.enabled",
-                                "ꜱᴇʟꜰ-ᴘʀᴏꜰɪʟᴇʀ",
-                                "ᴛɪᴍᴇꜱ ꜱᴇᴄᴛɪᴏɴꜱ ᴏꜰ ᴛʜᴇ ᴘʟᴜɢɪɴ'ꜱ ᴏᴡɴ\nᴄᴏᴅᴇ ꜰᴏʀ /ꜰᴘᴘ ᴘᴇʀꜰ ʀᴇᴘᴏʀᴛ. ꜱᴍᴀʟʟ\nᴏᴠᴇʀʜᴇᴀᴅ ᴡʜɪʟᴇ ᴏɴ.",
-                                Material.COMPARATOR),
-                        SettingEntry.toggle(
-                                "performance.self-profiler.method-level",
-                                "ꜱᴇʟꜰ-ᴘʀᴏꜰɪʟᴇʀ: ᴍᴇᴛʜᴏᴅ-ʟᴇᴠᴇʟ",
-                                "ꜰɪɴᴇʀ-ɢʀᴀɪɴᴇᴅ ᴍᴇᴛʜᴏᴅ ᴛɪᴍɪɴɢꜱ.\nʜɪɢʜᴇʀ ᴏᴠᴇʀʜᴇᴀᴅ - ᴜꜱᴇ ꜰᴏʀ ᴅᴇᴇᴘ\nᴅɪᴀɢɴᴏꜱɪꜱ ᴏɴʟʏ.",
-                                Material.REDSTONE),
-                        SettingEntry.toggle(
-                                "performance.self-profiler.export-on-warning",
-                                "ᴇxᴘᴏʀᴛ ᴏɴ ᴡᴀʀɴɪɴɢ",
-                                "ᴀᴜᴛᴏ-ꜱᴀᴠᴇꜱ ᴀ ꜰᴜʟʟ ᴘᴇʀꜰᴏʀᴍᴀɴᴄᴇ ʀᴇᴘᴏʀᴛ\nᴡʜᴇɴ ᴀ ᴄᴏɴꜱᴏʟᴇ ᴡᴀʀɴɪɴɢ ꜰɪʀᴇꜱ.",
-                                Material.CHEST)));
-    }
-
     private static final String PATHFINDING_DEBUG_ALL_KEY = "pathfinding_debug_all";
 
     private Category debug() {
@@ -1278,7 +1088,7 @@ public final class SettingGui implements Listener {
                                 "ᴛᴏɢɢʟᴇꜱ ᴛʜᴇ ᴘᴀᴛʜꜰɪɴᴅɪɴɢ ᴘᴀʀᴛɪᴄʟᴇ ᴛʀᴀɪʟ (ꜱᴀᴍᴇ ᴏɴᴇ ᴀꜱ ᴀ\n"
                                         + "ʙᴏᴛ'ꜱ ᴏᴡɴ ꜱᴇᴛᴛɪɴɢꜱ) ꜰᴏʀ ᴇᴠᴇʀʏ ᴄᴜʀʀᴇɴᴛʟʏ ᴀᴄᴛɪᴠᴇ ʙᴏᴛ ᴀᴛ\n"
                                         + "ᴏɴᴄᴇ, ᴠɪꜱɪʙʟᴇ ᴏɴʟʏ ᴛᴏ ʏᴏᴜ. ᴅᴏᴇꜱɴ'ᴛ ᴀᴜᴛᴏ-ᴀᴘᴘʟʏ ᴛᴏ ʙᴏᴛꜱ\n"
-                                        + "ꜱᴘᴀᴡɴᴇᴅ ᴀꜰᴛᴇʀ ʏᴏᴜ ᴛᴏɢɢʟᴇ ᴛʜɪꜱ - ʀᴇ-ᴄʟɪᴄᴋ ᴛᴏ ᴘɪᴄᴋ ᴛʜᴇᴍ ᴜᴘ.",
+                                        + "ꜱᴘᴀᴡɴᴇᴅ ᴀꜰᴛᴇʀ ʏᴏᴜ ᴛᴏɢɢʟᴇ ᴛʜɪꜱ — ʀᴇ-ᴄʟɪᴄᴋ ᴛᴏ ᴘɪᴄᴋ ᴛʜᴇᴍ ᴜᴘ.",
                                 Material.MAP),
                         // ── Core switches ────────────────────────────────────
                         SettingEntry.debugToggle(
@@ -1397,7 +1207,6 @@ public final class SettingGui implements Listener {
         TOGGLE,
         CYCLE_INT,
         CYCLE_DOUBLE,
-        STRING,
         ACTION,
         COMING_SOON,
         DEBUG_TOGGLE
@@ -1449,10 +1258,6 @@ public final class SettingGui implements Listener {
             return new SettingEntry(key, label, desc, icon, SettingType.CYCLE_DOUBLE, null, values, null, null);
         }
 
-        static SettingEntry text(String key, String label, String desc, Material icon) {
-            return new SettingEntry(key, label, desc, icon, SettingType.STRING, null, null, null, null);
-        }
-
         static SettingEntry comingSoon(String key, String label, String desc, Material icon) {
             return new SettingEntry(key, label, desc, icon, SettingType.COMING_SOON, null, null, null, null);
         }
@@ -1477,7 +1282,6 @@ public final class SettingGui implements Listener {
                 case TOGGLE -> cfg.getBoolean(configKey, false) ? "✔ ᴇɴᴀʙʟᴇᴅ" : "✘ ᴅɪꜱᴀʙʟᴇᴅ";
                 case DEBUG_TOGGLE -> Config.debugBoolValue(configKey, false) ? "✔ ᴇɴᴀʙʟᴇᴅ" : "✘ ᴅɪꜱᴀʙʟᴇᴅ";
                 case CYCLE_INT -> String.valueOf(cfg.getInt(configKey, intValues[0]));
-                case STRING -> cfg.getString(configKey, "");
                 case ACTION -> "ᴄʟɪᴄᴋ ᴛᴏ ʀᴜɴ";
                 case CYCLE_DOUBLE -> {
                     double d = cfg.getDouble(configKey, dblValues[0]);

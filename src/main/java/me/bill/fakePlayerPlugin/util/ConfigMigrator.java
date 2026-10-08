@@ -15,7 +15,7 @@ import me.bill.fakePlayerPlugin.FakePlayerPlugin;
 
 public final class ConfigMigrator {
 
-    public static final int CURRENT_VERSION = 79;
+    public static final int CURRENT_VERSION = 82;
 
     private static boolean rawDebug = false;
 
@@ -144,6 +144,9 @@ public final class ConfigMigrator {
         if (stored < 77) anyChange |= v76to77(cfg);
         if (stored < 78) anyChange |= v77to78(cfg);
         if (stored < 79) anyChange |= v78to79(cfg);
+        if (stored < 80) anyChange |= v79to80(cfg);
+        if (stored < 81) anyChange |= v80to81(cfg);
+        if (stored < 82) anyChange |= v81to82(cfg);
 
         fillDefaults(plugin, cfg);
 
@@ -1019,9 +1022,9 @@ public final class ConfigMigrator {
     }
 
     private static boolean v73to74(YamlConfiguration cfg) {
-        if (!cfg.contains("logging.debug.license")) {
-            cfg.set("logging.debug.license", false);
-            log("v73→v74", "added logging.debug.license toggle (default false)");
+        if (cfg.isSet("logging.debug.license")) {
+            cfg.set("logging.debug.license", null);
+            log("v73→v74", "removed obsolete license debug setting");
             return true;
         }
         return false;
@@ -1179,6 +1182,42 @@ public final class ConfigMigrator {
             log("v78→v79", "added right-click.interval-ticks = 4");
             changed = true;
         }
+        return changed;
+    }
+
+    private static boolean v79to80(YamlConfiguration cfg) {
+        if (!cfg.isSet("spawn.random-position-radius")) return false;
+        cfg.set("spawn.random-position-radius", null);
+        log("v79→v80", "removed the obsolete local random-spawn radius");
+        return true;
+    }
+
+    private static boolean v80to81(YamlConfiguration cfg) {
+        if (!cfg.getBoolean("persistence.enabled", false)) return false;
+        cfg.set("persistence.enabled", false);
+        log("v80→v81", "disabled automatic bot restoration after server restart");
+        return true;
+    }
+
+    private static boolean v81to82(YamlConfiguration cfg) {
+        boolean changed = false;
+        if (cfg.isSet("donut-chat.min-interval-seconds")) {
+            cfg.set("donut-chat.min-interval-seconds", null);
+            changed = true;
+        }
+        if (cfg.isSet("donut-chat.max-interval-seconds")) {
+            cfg.set("donut-chat.max-interval-seconds", null);
+            changed = true;
+        }
+        if (!cfg.isSet("donut-chat.min-messages-per-second")) {
+            cfg.set("donut-chat.min-messages-per-second", 10);
+            changed = true;
+        }
+        if (!cfg.isSet("donut-chat.max-messages-per-second") || cfg.getInt("donut-chat.max-messages-per-second") == 3) {
+            cfg.set("donut-chat.max-messages-per-second", 20);
+            changed = true;
+        }
+        if (changed) log("v81→v82", "changed Donut chat to 10–20 evenly distributed messages per second");
         return changed;
     }
 

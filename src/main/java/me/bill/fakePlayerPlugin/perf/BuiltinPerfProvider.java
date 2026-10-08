@@ -3,7 +3,6 @@ package me.bill.fakePlayerPlugin.perf;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
-import java.time.Instant;
 
 import org.bukkit.Bukkit;
 
@@ -32,28 +31,7 @@ public final class BuiltinPerfProvider implements PerfDataProvider {
         long gcFreq = gcAvgFrequency();
         MemoryMXBean memory = ManagementFactory.getMemoryMXBean();
         MemoryUsage heap = memory.getHeapMemoryUsage();
-        int online = Bukkit.getOnlinePlayers().size();
-        int entities = 0;
-        try {
-            entities = Bukkit.getWorlds().stream()
-                    .mapToInt(w -> w.getEntities().size())
-                    .sum();
-        } catch (Exception ignored) {
-        }
-        return new PerfSnapshot(
-                Instant.now(),
-                tps,
-                mspt,
-                -1,
-                cpuProcess,
-                cpuSystem,
-                gcTime,
-                gcFreq,
-                heap.getUsed() / (1024L * 1024L),
-                heap.getCommitted() / (1024L * 1024L),
-                online,
-                botCount,
-                entities);
+        return PerfSnapshot.create(tps, mspt, -1, cpuProcess, cpuSystem, gcTime, gcFreq, botCount, -1, -1);
     }
 
     @Override

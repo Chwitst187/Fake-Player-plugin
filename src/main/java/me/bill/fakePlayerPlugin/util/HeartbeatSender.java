@@ -5,7 +5,6 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 
-import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 
 import com.google.gson.JsonObject;
@@ -50,29 +49,19 @@ public final class HeartbeatSender {
 
     private void send() {
         if (!Config.heartbeatEnabled()) return;
-        FppScheduler.runAsync(plugin, this::sendBlocking);
+
+        int botCount = fakePlayerManager == null ? 0 : fakePlayerManager.getCount();
+        int playerCount = fakePlayerManager == null
+                ? 0
+                : fakePlayerManager.getRealPlayers().size();
+        String version = plugin.getPluginMeta().getVersion();
+        String serverId = resolveServerId(Config.serverId());
+
+        FppScheduler.runAsync(plugin, () -> sendBlocking(playerCount, botCount, serverId, version));
     }
 
-    private void sendBlocking() {
+    private void sendBlocking(int playerCount, int botCount, String serverId, String version) {
         try {
-            String configuredId = Config.serverId();
-            int totalOnline = Bukkit.getOnlinePlayers().size();
-            int botCount = fakePlayerManager == null ? 0 : fakePlayerManager.getCount();
-            // Bots are real ServerPlayer entities and appear in getOnlinePlayers(),
-            // so subtract them so the web dashboard shows *real* human players.
-            int playerCount = Math.max(0, totalOnline - botCount);
-            String version = plugin.getPluginMeta().getVersion();
-
-            // If server_id is the generic "default", make it unique per JVM
-            // by appending IP:port. This prevents multiple backend servers from
-            // overwriting each other in the web dashboard.
-            String serverId = configuredId;
-            if ("default".equalsIgnoreCase(configuredId) || configuredId.isBlank()) {
-                String ip = Bukkit.getServer().getIp();
-                int port = Bukkit.getServer().getPort();
-                serverId = "default@" + (ip.isEmpty() ? "0.0.0.0" : ip) + ":" + port;
-            }
-
             JsonObject payload = new JsonObject();
             payload.addProperty("server_id", serverId);
             payload.addProperty("player_count", playerCount);
@@ -107,5 +96,15 @@ public final class HeartbeatSender {
         } catch (Exception e) {
             Config.debug("Heartbeat: failed - " + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
+    }
+
+    private String resolveServerId(String configuredId) {
+        String serverId = configuredId;
+        if ("default".equalsIgnoreCase(configuredId) || configuredId.isBlank()) {
+            String ip = plugin.getServer().getIp();
+            int port = plugin.getServer().getPort();
+            serverId = "default@" + (ip.isEmpty() ? "0.0.0.0" : ip) + ":" + port;
+        }
+        return serverId;
     }
 }

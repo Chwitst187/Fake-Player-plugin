@@ -9,7 +9,7 @@ import me.bill.fakePlayerPlugin.config.Config;
 import me.bill.fakePlayerPlugin.permission.Perm;
 
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.TextColor;
+import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 
 public final class FppLogger {
@@ -17,24 +17,23 @@ public final class FppLogger {
     private static final String RESET = "\u001B[0m";
     private static final String BOLD = "\u001B[1m";
 
-    // FPP 2.0 "Bot Console" palette - violet / lime, see language/en.yml header for the full reference.
-    private static final String BLUE = "\u001B[38;2;167;139;250m"; // violet #A78BFA
+    private static final String BLUE = "\u001B[38;2;0;121;255m";
 
-    private static final String WHITE = "\u001B[38;2;238;236;247m"; // ink #EEECF7
+    private static final String WHITE = "\u001B[97m";
 
-    private static final String YELLOW = "\u001B[38;2;186;255;79m"; // lime #BAFF4F
+    private static final String YELLOW = "\u001B[93m";
 
-    private static final String GREEN = "\u001B[38;2;186;255;79m"; // lime #BAFF4F
+    private static final String GREEN = "\u001B[92m";
 
-    private static final String GOLD = "\u001B[38;2;186;255;79m"; // lime #BAFF4F
+    private static final String GOLD = "\u001B[33m";
 
-    private static final String RED = "\u001B[38;2;255;106;92m"; // red #FF6A5C
+    private static final String RED = "\u001B[91m";
 
-    private static final String GRAY = "\u001B[38;2;150;145;171m"; // mute #9691AB
+    private static final String GRAY = "\u001B[90m";
 
-    private static final String CYAN = "\u001B[38;2;202;186;255m"; // violet-soft #CABAFF
+    private static final String CYAN = "\u001B[96m";
 
-    private static final String DARK = "\u001B[38;2;95;91;115m"; // mute-2 #5F5B73
+    private static final String DARK = "\u001B[38;5;240m";
 
     private static final String TAG = BOLD + BLUE + "[ꜰᴘᴘ]" + RESET;
 
@@ -80,10 +79,10 @@ public final class FppLogger {
         if (Config.debugChatBroadcast()) {
             Component chatMsg = Component.empty()
                     .decoration(TextDecoration.ITALIC, false)
-                    .append(Component.text("[ꜰᴘᴘ DEBUG/").color(TextColor.fromHexString("#9691AB")))
-                    .append(Component.text(label).color(TextColor.fromHexString("#CABAFF")))
-                    .append(Component.text("] ").color(TextColor.fromHexString("#9691AB")))
-                    .append(Component.text(message).color(TextColor.fromHexString("#BAFF4F")));
+                    .append(Component.text("[ꜰᴘᴘ DEBUG/").color(NamedTextColor.GRAY))
+                    .append(Component.text(label).color(NamedTextColor.AQUA))
+                    .append(Component.text("] ").color(NamedTextColor.GRAY))
+                    .append(Component.text(message).color(NamedTextColor.YELLOW));
             for (Player p : Bukkit.getOnlinePlayers()) {
                 if (Perm.has(p, Perm.OP) || Perm.has(p, Perm.NOTIFY)) {
                     p.sendMessage(chatMsg);
@@ -116,29 +115,14 @@ public final class FppLogger {
     }
 
     public static void statusRow(boolean ok, String label, String detail) {
-        String badge = ok ? GREEN + "[+]" + RESET : RED + "[✘]" + RESET;
-        int dots = Math.max(1, KEY_WIDTH - label.length());
-        String dotStr = DARK + ".".repeat(dots) + RESET;
-        String valueColor = ok ? GREEN : GRAY;
-        logger.info(TAG
-                + " "
-                + GRAY
-                + "  "
-                + badge
-                + " "
-                + WHITE
-                + label
-                + " "
-                + dotStr
-                + " "
-                + valueColor
-                + detail
-                + RESET);
+        stateRow(ok ? RowState.OK : RowState.WARN, label, detail);
     }
 
     private static void stateRow(RowState state, String label, String detail) {
         String badge;
         String valueColor;
+        boolean severe = false;
+        boolean warn = false;
         switch (state) {
             case OK -> {
                 badge = GREEN + "[+]" + RESET;
@@ -147,16 +131,23 @@ public final class FppLogger {
             case WARN -> {
                 badge = YELLOW + "[!]" + RESET;
                 valueColor = YELLOW;
+                warn = true;
+            }
+            case SEVERE -> {
+                badge = RED + "[✘]" + RESET;
+                valueColor = RED;
+                severe = true;
             }
             default -> {
                 badge = GRAY + "[-]" + RESET;
                 valueColor = GRAY;
+                warn = true;
             }
         }
 
         int dots = Math.max(1, KEY_WIDTH - label.length());
         String dotStr = DARK + ".".repeat(dots) + RESET;
-        logger.info(TAG
+        String message = TAG
                 + " "
                 + GRAY
                 + "  "
@@ -169,7 +160,14 @@ public final class FppLogger {
                 + " "
                 + valueColor
                 + detail
-                + RESET);
+                + RESET;
+        if (severe) {
+            logger.severe(message);
+        } else if (warn) {
+            logger.warning(message);
+        } else {
+            logger.info(message);
+        }
     }
 
     @SuppressWarnings("unused")
@@ -186,9 +184,19 @@ public final class FppLogger {
             boolean persistEnabled,
             boolean taskPersistEnabled,
             boolean luckPermsFound,
+            String luckPermsDetail,
+            boolean phoenixFound,
+            String phoenixDetail,
+            boolean boltHookActive,
+            String boltHookDetail,
+            boolean packetEventsFound,
+            String packetEventsDetail,
             boolean chunkLoading,
             int maxBots,
             boolean metricsActive,
+            boolean voiceChatFound,
+            boolean voiceChatHookActive,
+            String voiceChatStatus,
             String configVersion,
             int backupCount,
             long startupMs) {
@@ -211,7 +219,18 @@ public final class FppLogger {
         stateRow(chunkLoading ? RowState.OK : RowState.OFF, "Chunk loading", onOff(chunkLoading));
 
         section("Integrations");
-        stateRow(luckPermsFound ? RowState.OK : RowState.OFF, "LuckPerms", onOff(luckPermsFound));
+        stateRow(luckPermsFound ? RowState.OK : RowState.OFF, "LuckPerms", hookLabel(luckPermsDetail, luckPermsFound));
+        stateRow(phoenixFound ? RowState.OK : RowState.OFF, "Phoenix", hookLabel(phoenixDetail, phoenixFound));
+        stateRow(boltHookActive ? RowState.OK : RowState.OFF, "Bolt", hookLabel(boltHookDetail, boltHookActive));
+        stateRow(
+                packetEventsFound ? RowState.OK : RowState.OFF,
+                "PacketEvents",
+                hookLabel(packetEventsDetail, packetEventsFound));
+        stateRow(
+                voiceChatFound ? (voiceChatHookActive ? RowState.OK : RowState.WARN) : RowState.OFF,
+                "VoiceChat",
+                voiceChatStatus);
+
         stateRow(metricsActive ? RowState.OK : RowState.OFF, "Metrics", onOff(metricsActive));
 
         section("Limits");
@@ -243,6 +262,10 @@ public final class FppLogger {
         return seconds + "s";
     }
 
+    private static String hookLabel(String detail, boolean enabled) {
+        return (detail == null || detail.isBlank()) ? onOff(enabled) : detail;
+    }
+
     private static String onOff(boolean enabled) {
         return enabled ? "enabled" : "disabled";
     }
@@ -250,7 +273,9 @@ public final class FppLogger {
     private static RowState resolveDbState(String dbState) {
         if (dbState == null) return RowState.WARN;
         String s = dbState.toLowerCase();
-        if (s.contains("failed")) return RowState.WARN;
+        if (s.contains("failed") || s.contains("error") || s.contains("exception") || s.contains("unavailable")) {
+            return RowState.SEVERE;
+        }
         if (s.contains("disabled") || s.contains("none")) return RowState.OFF;
         return RowState.OK;
     }
@@ -258,6 +283,7 @@ public final class FppLogger {
     private enum RowState {
         OK,
         WARN,
-        OFF
+        OFF,
+        SEVERE
     }
 }

@@ -10,19 +10,26 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
+import org.bukkit.HeightMap;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -59,8 +66,6 @@ import me.bill.fakePlayerPlugin.database.BotRecord;
 import me.bill.fakePlayerPlugin.database.DatabaseManager;
 import me.bill.fakePlayerPlugin.listener.PlayerJoinListener;
 import me.bill.fakePlayerPlugin.util.AttributeCompat;
-import me.bill.fakePlayerPlugin.util.AttributionApiManager;
-import me.bill.fakePlayerPlugin.util.AttributionManager;
 import me.bill.fakePlayerPlugin.util.BadwordFilter;
 import me.bill.fakePlayerPlugin.util.FppLogger;
 import me.bill.fakePlayerPlugin.util.FppScheduler;
@@ -76,6 +81,30 @@ public class FakePlayerManager {
     public static NamespacedKey FAKE_PLAYER_KEY;
 
     private static final double MIN_FALL_DAMAGE_DISTANCE = 4.0;
+    private static final int MAX_SAFE_RANDOM_SPAWN_ATTEMPTS = 24;
+    private static final double DEFAULT_WORLD_BORDER_SIZE = 59_999_968.0;
+    private static final double RANDOM_SPAWN_BORDER_MARGIN = 2.0;
+    private static final int RANDOM_SPAWN_INTERIOR_ROLLS = 16;
+    private static final int[][] RANDOM_SPAWN_COLUMN_PROBES = {
+        {8, 8}, {4, 4}, {12, 12}, {4, 12}, {12, 4}, {8, 4}, {8, 12}, {4, 8}, {12, 8}
+    };
+    private static final Set<Material> DANGEROUS_SPAWN_MATERIALS = EnumSet.of(
+            Material.LAVA,
+            Material.FIRE,
+            Material.SOUL_FIRE,
+            Material.MAGMA_BLOCK,
+            Material.CAMPFIRE,
+            Material.SOUL_CAMPFIRE,
+            Material.CACTUS,
+            Material.POWDER_SNOW,
+            Material.SWEET_BERRY_BUSH,
+            Material.WITHER_ROSE,
+            Material.POINTED_DRIPSTONE,
+            Material.BUBBLE_COLUMN,
+            Material.COBWEB,
+            Material.END_PORTAL,
+            Material.END_GATEWAY,
+            Material.NETHER_PORTAL);
 
     private final FakePlayerPlugin plugin;
     private final Map<UUID, FakePlayer> activePlayers = new ConcurrentHashMap<>();
@@ -93,7 +122,8 @@ public class FakePlayerManager {
     private static final double HEAD_AI_GAZE_COS = Math.cos(Math.toRadians(15.0));
 
     private final Map<String, FakePlayer> nameIndex = new ConcurrentHashMap<>();
-    private final Set<String> usedNames = new HashSet<>();
+    private final Set<String> usedNames = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Set<FakePlayer>> botsByOwner = new ConcurrentHashMap<>();
 
     private final Map<UUID, Long> spawnCooldowns = new ConcurrentHashMap<>();
 
@@ -107,13 +137,23 @@ public class FakePlayerManager {
 
     private volatile List<String> cleanNamePool = Collections.emptyList();
 
-    private List<Player> cachedOnlinePlayers = new ArrayList<>();
+    private volatile List<Player> cachedOnlinePlayers = List.of();
+
+    private final Map<UUID, Player> realPlayers = new ConcurrentHashMap<>();
+    private final ConcurrentLinkedQueue<FakePlayer> botTickQueue = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<FakePlayer> tabListScanQueue = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<FakePlayer> validationQueue = new ConcurrentLinkedQueue<>();
+    private final Map<UUID, Long> lastLocationCaptureTick = new ConcurrentHashMap<>();
+    private final Map<UUID, UUID> playerSyncTokens = new ConcurrentHashMap<>();
 
     private int headAiTickCounter = 0;
 
     private volatile long visualSyncTickCounter = 0L;
 
-    private final Set<UUID> bodyTransitionBots = new HashSet<>();
+    private final Set<UUID> bodyTransitionBots = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> bodySpawnInProgress = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> initialSpawnPending = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, SpawnChunkLease> spawnChunkLeases = new ConcurrentHashMap<>();
 
     private final Set<UUID> bodyTransitionMessageSuppression = ConcurrentHashMap.newKeySet();
 
@@ -173,20 +213,22 @@ public class FakePlayerManager {
         this.db = db;
     }
 
-    public void setBotPersistence(BotPersistence p) {
-        this.persistence = p;
-    }
-
     public void setBotAuthManager(BotAuthManager authManager) {
         this.authManager = authManager;
+    }
+
+    public void setBotPersistence(BotPersistence p) {
+        this.persistence = p;
     }
 
     public void refreshCleanNamePool() {
         List<String> raw = Config.namePool();
         List<String> clean = new ArrayList<>(raw.size());
+        Set<String> seen = new HashSet<>();
         for (String n : raw) {
             if (n == null || n.isEmpty() || n.length() > 16 || !n.matches("[a-zA-Z0-9_]+")) continue;
             if (!BadwordFilter.isAllowed(n)) continue;
+            if (!seen.add(n.toLowerCase(Locale.ROOT))) continue;
             clean.add(n);
         }
         cleanNamePool = Collections.unmodifiableList(clean);
@@ -198,33 +240,15 @@ public class FakePlayerManager {
         this.plugin = plugin;
         FAKE_PLAYER_KEY = new NamespacedKey(plugin, "fake_player_name");
 
-        if (!AttributionManager.quickAuthorCheck() || !AttributionApiManager.quickEndpointCheck()) {
-            // Attribution integrity check failed - silently continuing.
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            realPlayers.put(player.getUniqueId(), player);
         }
+        refreshRealPlayerSnapshot();
 
         long flushTicks = Math.max(20L, Config.dbLocationFlushInterval() * 20L);
         FppScheduler.runSyncRepeating(
                 plugin,
                 () -> {
-                    if (activePlayers.isEmpty()) return;
-                    for (FakePlayer fp : activePlayers.values()) {
-
-                        Location loc = fp.getLiveLocation();
-                        if (loc == null || loc.getWorld() == null) continue;
-                        String world = loc.getWorld().getName();
-
-                        fp.setSpawnLocation(loc.clone());
-                        if (db != null) {
-                            db.updateLastLocation(
-                                    fp.getUuid(),
-                                    world,
-                                    loc.getX(),
-                                    loc.getY(),
-                                    loc.getZ(),
-                                    loc.getYaw(),
-                                    loc.getPitch());
-                        }
-                    }
                     if (db != null && dbLocationFlushRunning.compareAndSet(false, true)) {
                         FppScheduler.runAsync(plugin, () -> {
                             try {
@@ -245,7 +269,13 @@ public class FakePlayerManager {
                     if (activePlayers.isEmpty()) return;
                     List<Player> online = cachedOnlinePlayers;
                     if (online == null || online.isEmpty()) return;
-                    for (FakePlayer fp : activePlayers.values()) {
+                    int budget = tabListCheckBudgetForLoad(
+                            activePlayers.size(), Config.performanceMaxTabListChecksPerPass());
+                    for (int checked = 0; checked < budget; checked++) {
+                        FakePlayer fp = tabListScanQueue.poll();
+                        if (fp == null) break;
+                        if (activePlayers.get(fp.getUuid()) != fp) continue;
+                        tabListScanQueue.offer(fp);
                         if (!fp.isTabListDirty()) continue;
                         fp.clearTabListDirty();
                         for (Player p : online) {
@@ -260,119 +290,52 @@ public class FakePlayerManager {
                 plugin,
                 () -> {
                     if (activePlayers.isEmpty()) return;
-                    final boolean foliaServer = NmsPlayerSpawner.isFoliaServer();
-                    for (FakePlayer fp : activePlayers.values()) {
-                        // Per-bot guard: one bad bot must never kill this repeating task - a dead
-                        // refresh loop freezes every nametag's activity row on its last value.
-                        Runnable refreshTick = () -> {
-                            try {
-                                // Unconditional, every sweep (not gated on label change): a bot that
-                                // gets put on some OTHER scoreboard team (another plugin's own
-                                // prefix/color system, an admin's /scoreboard teams join, …) is
-                                // silently evicted from our hide-team by the client - Minecraft only
-                                // allows one team per player - bringing the real name back without
-                                // ever touching the text_display. A bot whose activity label never
-                                // changes would otherwise never get re-hidden. Cheap (one tiny
-                                // packet), so doing it every 10 ticks for every bot is fine.
-                                FakePlayerBody.reassertVanillaNameHidden(fp);
-
-                                // Self-heal: the nametag is a real world entity (a TextDisplay), so
-                                // anything that can remove an entity - /kill, WorldEdit, another
-                                // plugin's cleanup pass - can remove it too. getNametagEntity() only
-                                // ever goes null when WE clear it; an external removal leaves a stale
-                                // non-null reference behind, so check isValid(), not just null, and
-                                // respawn immediately when it's gone. This is what makes the tag
-                                // effectively unremovable instead of merely "usually present".
-                                Entity tag = fp.getNametagEntity();
-                                if (tag == null || !tag.isValid()) {
-                                    if (!Config.nametagSecondLineEnabled()) return;
-                                    Player body = fp.getPlayer();
-                                    if (body == null || !body.isOnline()) return;
-                                    FakePlayerBody.spawnNametag(fp, body);
-                                    fp.setLastRenderedActionLabel(BotActivity.currentLabel(fp));
-                                    return;
-                                }
-                                String label = BotActivity.currentLabel(fp);
-                                if (label.equals(fp.getLastRenderedActionLabel())) return;
-                                fp.setLastRenderedActionLabel(label);
-                                FakePlayerBody.refreshNametag(fp);
-                            } catch (Throwable t) {
-                                Config.debug("Nametag activity refresh failed for '" + fp.getName() + "': " + t);
-                            }
-                        };
-                        // BotActivity.currentLabel() and the text-display update both touch entity
-                        // state, so on Folia they must run on the bot's owning region thread rather
-                        // than the global region thread this loop itself is ticking on.
-                        if (foliaServer) {
-                            Player bot = fp.getPlayer();
-                            if (bot == null) continue;
-                            FppScheduler.runAtEntity(plugin, bot, refreshTick);
-                        } else {
-                            refreshTick.run();
-                        }
-                    }
-                },
-                10L,
-                10L);
-
-        FppScheduler.runSyncRepeating(
-                plugin,
-                () -> {
-                    if (activePlayers.isEmpty()) return;
 
                     final boolean foliaServer = NmsPlayerSpawner.isFoliaServer();
                     headAiTickCounter++;
                     final boolean headAiOn = Config.headAiEnabled();
                     final int headAiRate = Config.headAiTickRate();
 
-                    // Head-AI's target lookup reads other online players' eye locations, and its
-                    // rotation writes target the bot itself - both already happen unconditionally
-                    // elsewhere in this same per-bot tick (position-sync snapshot above, physics
-                    // below), which on Folia is dispatched onto the bot's own entity scheduler via
-                    // FppScheduler.runAtEntity. So head-AI is just as Folia-safe as the rest of the
-                    // tick; it no longer needs to be disabled on Folia specifically.
+                    // The bot tick itself runs on the bot's entity scheduler. On Folia, every
+                    // other player is filtered through isOwnedByCurrentRegion before any state is
+                    // read, so Head-AI and visual sync only touch entities in this same region.
                     final boolean doHeadAi = headAiOn && (headAiTickCounter % headAiRate == 0);
                     final double rangeSq = doHeadAi ? Config.headAiLookRange() * Config.headAiLookRange() : 0;
                     final float speed = doHeadAi ? Config.headAiTurnSpeed() : 0f;
 
                     final double psd = Config.positionSyncDistance();
                     final double posSyncDistSq = psd > 0 ? psd * psd : -1;
-                    visualSyncTickCounter++;
+                    final long scheduledTick = ++visualSyncTickCounter;
 
-                    final List<Player> onlineSnapshot = currentOnlineSnapshot();
-
-                    for (FakePlayer fp : activePlayers.values()) {
+                    int budget = botTickBudgetForLoad(activePlayers.size(), Config.performanceMaxBotTicksPerTick());
+                    for (int processed = 0; processed < budget; processed++) {
+                        FakePlayer fp = botTickQueue.poll();
+                        if (fp == null) break;
+                        if (activePlayers.get(fp.getUuid()) != fp) continue;
+                        botTickQueue.offer(fp);
                         Player bot = fp.getPlayer();
 
                         if (bot == null) continue;
                         Runnable botTick = () -> {
                             if (!activePlayers.containsKey(fp.getUuid())) return;
                             if (!bot.isValid() || bot.isDead()) return;
+                            Location before = bot.getLocation();
+                            captureLocationIfDue(fp, before, scheduledTick, flushTicks);
+                            if (chunkLoader != null) {
+                                chunkLoader.updateFromEntityTick(fp, before, scheduledTick);
+                            }
+                            if (isStaggeredTick(fp, 10, 31, scheduledTick)) {
+                                refreshNametagActivity(fp, bot);
+                            }
                             if (fp.isFrozen() || fp.isAuthPending()) return;
                             UUID uuid = fp.getUuid();
                             boolean isNavigating = plugin.getPathfindingService() != null
                                     && plugin.getPathfindingService().isNavigating(uuid);
-                            boolean isActing = actingBots.containsKey(uuid);
+                            boolean isActing = actingBots.contains(uuid);
                             boolean isNavLocked = navLockedBots.contains(uuid);
                             boolean hasMiningLock = actionLockedBots.containsKey(uuid);
                             boolean sendVisualSyncThisTick = shouldSendLaggedVisualUpdate(fp);
                             boolean runBehaviorThisTick = shouldRunLaggedBehaviorUpdate(fp);
-                            Location before = bot.getLocation();
-
-                            final int onlineCount = onlineSnapshot.size();
-                            final double[] playerX = new double[onlineCount];
-                            final double[] playerY = new double[onlineCount];
-                            final double[] playerZ = new double[onlineCount];
-                            final World[] playerWorld = new World[onlineCount];
-                            for (int pi = 0; pi < onlineCount; pi++) {
-                                Player p = onlineSnapshot.get(pi);
-                                if (p == null || !p.isValid()) continue;
-                                Location pl = p.getLocation();
-                                playerX[pi] = pl.getX();
-                                playerY[pi] = pl.getY();
-                                playerZ[pi] = pl.getZ();
-                                playerWorld[pi] = pl.getWorld();
-                            }
 
                             if (!fp.isFrozen()) {
 
@@ -402,10 +365,10 @@ public class FakePlayerManager {
                                 if (fp.isSleeping()) {
                                     ServerPlayer nmsBot = ((CraftPlayer) bot).getHandle();
                                     if (!nmsBot.isSleeping()) {
-                                        // NMS already woke the bot - clear flag and fall through to normal tick.
+                                        // NMS already woke the bot — clear flag and fall through to normal tick.
                                         fp.setSleeping(false);
                                         actionLockedBots.remove(uuid);
-                                        // fall through - bot immediately resumes normal physics/AI below
+                                        // fall through — bot immediately resumes normal physics/AI below
                                     } else {
                                         // Still genuinely sleeping: zero velocity, tick physics so that
                                         // NMS sleepCounter increments (needed for time-skip to dawn),
@@ -439,8 +402,7 @@ public class FakePlayerManager {
                                         && doHeadAi
                                         && fp.isHeadAiEnabled()
                                         && !isNavLocked
-                                        && !isActing
-                                        && onlineCount > 0) {
+                                        && !isActing) {
 
                                     // Head-AI target selection: only track a player who is actively
                                     // looking at this bot (eye-contact model). Conditions:
@@ -452,24 +414,23 @@ public class FakePlayerManager {
                                     // walks past; they only react when a player is gazing at them.
                                     Player target = null;
                                     double bestSq = rangeSq;
-                                    for (int pi2 = 0; pi2 < onlineCount; pi2++) {
-                                        Player p = onlineSnapshot.get(pi2);
-                                        if (playerWorld[pi2] == null) continue;
-                                        if (activePlayers.containsKey(p.getUniqueId())) continue;
+                                    for (Player p : nearbyPlayers(before, Math.sqrt(rangeSq))) {
+                                        if (!canUseViewer(p, bot, foliaServer)) continue;
                                         if (p.getGameMode() == GameMode.SPECTATOR) continue;
-                                        if (playerWorld[pi2] != before.getWorld()) continue;
-                                        double ddx = playerX[pi2] - before.getX();
-                                        double ddy = playerY[pi2] - before.getY();
-                                        double ddz = playerZ[pi2] - before.getZ();
+                                        Location playerEye = p.getEyeLocation();
+                                        if (playerEye.getWorld() != before.getWorld()) continue;
+                                        double ddx = playerEye.getX() - before.getX();
+                                        double ddy = playerEye.getY() - (before.getY() + 1.62);
+                                        double ddz = playerEye.getZ() - before.getZ();
                                         double dSq = ddx * ddx + ddy * ddy + ddz * ddz;
                                         if (dSq > bestSq) continue;
                                         // Check that the player is looking toward this bot (gaze test).
                                         // We compare the player's look direction against the unit vector
                                         // from the player's eye to the bot's eye.
-                                        Vector lookDir = p.getEyeLocation().getDirection();
-                                        double botEyeX = before.getX() - playerX[pi2];
-                                        double botEyeY = (before.getY() + 1.62) - (playerY[pi2] + 1.62);
-                                        double botEyeZ = before.getZ() - playerZ[pi2];
+                                        Vector lookDir = playerEye.getDirection();
+                                        double botEyeX = before.getX() - playerEye.getX();
+                                        double botEyeY = (before.getY() + 1.62) - playerEye.getY();
+                                        double botEyeZ = before.getZ() - playerEye.getZ();
                                         double dist =
                                                 Math.sqrt(botEyeX * botEyeX + botEyeY * botEyeY + botEyeZ * botEyeZ);
                                         if (dist < 0.001) continue;
@@ -477,7 +438,7 @@ public class FakePlayerManager {
                                                         + lookDir.getY() * botEyeY
                                                         + lookDir.getZ() * botEyeZ)
                                                 / dist;
-                                        // cos(15°) ≈ 0.9659 - tighter cone means more deliberate eye-contact
+                                        // cos(15°) ≈ 0.9659 — tighter cone means more deliberate eye-contact
                                         if (dot < HEAD_AI_GAZE_COS) continue;
                                         if (!hasLineOfSightIgnoringGlass(bot, p)) continue;
                                         bestSq = dSq;
@@ -514,13 +475,13 @@ public class FakePlayerManager {
                                                     || Math.abs(rot[1] - lastSent[1]) > 0.5f;
                                             if (shouldBroadcast) {
                                                 lastSentVisualRotation.put(uuid, new float[] {rot[0], rot[1]});
-                                                for (int pi2 = 0; pi2 < onlineCount; pi2++) {
-                                                    Player p = onlineSnapshot.get(pi2);
-                                                    if (p.getUniqueId().equals(uuid)) continue;
-                                                    if (playerWorld[pi2] != before.getWorld()) continue;
+                                                for (Player p : visualSyncViewers(before, psd)) {
+                                                    if (!canUseViewer(p, bot, foliaServer)) continue;
+                                                    Location viewerLocation = p.getLocation();
+                                                    if (viewerLocation.getWorld() != before.getWorld()) continue;
                                                     if (posSyncDistSq > 0) {
-                                                        double ddx = playerX[pi2] - before.getX();
-                                                        double ddz = playerZ[pi2] - before.getZ();
+                                                        double ddx = viewerLocation.getX() - before.getX();
+                                                        double ddz = viewerLocation.getZ() - before.getZ();
                                                         if (ddx * ddx + ddz * ddz > posSyncDistSq) continue;
                                                     }
                                                     PacketHelper.sendRotationDirect(
@@ -564,28 +525,26 @@ public class FakePlayerManager {
                                     before.getWorld() == after.getWorld() && (dxM * dxM + dyM * dyM + dzM * dzM) > 1e-8;
                             double vx = vel2.getX(), vy = vel2.getY(), vz2 = vel2.getZ();
                             if (sendVisualSyncThisTick && (moved || (vx * vx + vy * vy + vz2 * vz2) > 1e-6)) {
-                                if (onlineCount > 0) {
-                                    for (int pi2 = 0; pi2 < onlineCount; pi2++) {
-                                        Player p = onlineSnapshot.get(pi2);
-                                        if (p.equals(bot)) continue;
-                                        if (playerWorld[pi2] == null) continue;
-
-                                        if (posSyncDistSq > 0) {
-                                            if (playerWorld[pi2] != after.getWorld()) continue;
-                                            double ddx = playerX[pi2] - after.getX();
-                                            double ddy = playerY[pi2] - after.getY();
-                                            double ddz = playerZ[pi2] - after.getZ();
-                                            if (ddx * ddx + ddy * ddy + ddz * ddz > posSyncDistSq) continue;
-                                        }
-                                        PacketHelper.sendPositionSync(p, bot, after);
+                                for (Player p : visualSyncViewers(after, psd)) {
+                                    if (!canUseViewer(p, bot, foliaServer)) continue;
+                                    if (posSyncDistSq > 0) {
+                                        Location viewerLocation = p.getLocation();
+                                        if (viewerLocation.getWorld() != after.getWorld()) continue;
+                                        double ddx = viewerLocation.getX() - after.getX();
+                                        double ddy = viewerLocation.getY() - after.getY();
+                                        double ddz = viewerLocation.getZ() - after.getZ();
+                                        if (ddx * ddx + ddy * ddy + ddz * ddz > posSyncDistSq) continue;
                                     }
+                                    PacketHelper.sendPositionSync(p, bot, after);
                                 }
                             }
 
                             // Keep the name tag (a free display) glued above the bot. teleportDuration
                             // smooths the motion; only move it when the bot actually shifted.
                             var nameTag = fp.getNametagEntity();
-                            if (nameTag != null && nameTag.isValid()) {
+                            if (nameTag != null
+                                    && (!foliaServer || Bukkit.isOwnedByCurrentRegion(nameTag))
+                                    && nameTag.isValid()) {
                                 Location tl = nameTag.getLocation();
                                 double expectedY = after.getY() + Config.nametagSecondLineYOffset();
                                 boolean off = tl.getWorld() != after.getWorld()
@@ -604,6 +563,64 @@ public class FakePlayerManager {
                 },
                 1L,
                 1L);
+    }
+
+    public void trackRealPlayerJoin(Player player) {
+        if (player == null || activePlayers.containsKey(player.getUniqueId())) return;
+        realPlayers.put(player.getUniqueId(), player);
+        refreshRealPlayerSnapshot();
+    }
+
+    public void trackRealPlayerQuit(Player player) {
+        if (player == null) return;
+        realPlayers.remove(player.getUniqueId(), player);
+        playerSyncTokens.remove(player.getUniqueId());
+        refreshRealPlayerSnapshot();
+    }
+
+    private void refreshRealPlayerSnapshot() {
+        cachedOnlinePlayers = List.copyOf(realPlayers.values());
+    }
+
+    private void captureLocationIfDue(FakePlayer fp, Location location, long tick, long intervalTicks) {
+        if (fp == null || location == null || location.getWorld() == null) return;
+        UUID uuid = fp.getUuid();
+        Long previous = lastLocationCaptureTick.get(uuid);
+        if (previous != null && tick - previous < intervalTicks) return;
+        lastLocationCaptureTick.put(uuid, tick);
+
+        fp.setSpawnLocation(location.clone());
+        DatabaseManager currentDb = db;
+        if (currentDb != null) {
+            currentDb.updateLastLocation(
+                    uuid,
+                    location.getWorld().getName(),
+                    location.getX(),
+                    location.getY(),
+                    location.getZ(),
+                    location.getYaw(),
+                    location.getPitch());
+        }
+    }
+
+    private void refreshNametagActivity(FakePlayer fp, Player body) {
+        try {
+            // This piggybacks on the existing owning-region bot tick. The previous standalone
+            // 10-tick loop created another Folia entity task for every bot just to compare a label.
+            Entity tag = fp.getNametagEntity();
+            if (tag == null || !tag.isValid()) {
+                if (!Config.nametagSecondLineEnabled() || !body.isOnline()) return;
+                FakePlayerBody.spawnNametag(fp, body);
+                fp.setLastRenderedActionLabel(BotActivity.currentLabel(fp));
+                return;
+            }
+            String label = BotActivity.currentLabel(fp);
+            if (label.equals(fp.getLastRenderedActionLabel())) return;
+            fp.setLastRenderedActionLabel(label);
+            FakePlayerBody.refreshNametag(fp);
+        } catch (Throwable t) {
+            Config.debug("Nametag activity refresh failed for '" + fp.getName() + "': " + t);
+        }
     }
 
     private void tickFallDamage(FakePlayer fp, Player bot, Location before, Location after) {
@@ -766,12 +783,12 @@ public class FakePlayerManager {
         // Bot leave messages were removed with the chat system; fire the quit event with no
         // default message. The synthetic quit event itself is still required for despawn handling.
         PlayerQuitEvent quitEvent = new PlayerQuitEvent(player, (Component) null, reason);
-        Bukkit.getPluginManager().callEvent(quitEvent);
+        NmsPlayerSpawner.callSyntheticQuitEvent(quitEvent);
         syntheticQuitBotIds.add(fp.getUuid());
 
         Component message = quitEvent.quitMessage();
         if (message == null) return;
-        for (Player online : Bukkit.getOnlinePlayers()) {
+        for (Player online : cachedOnlinePlayers) {
             if (online != null && online.isOnline()) online.sendMessage(message);
         }
         Bukkit.getConsoleSender().sendMessage(message);
@@ -873,6 +890,98 @@ public class FakePlayerManager {
     }
 
     public int spawnUserBot(Location location, int count, Player spawner, boolean bypassMax, BotType botType) {
+        return spawnUserBot(location, count, spawner, bypassMax, botType, false);
+    }
+
+    public int spawnUserBot(
+            Location location, int count, Player spawner, boolean bypassMax, BotType botType, boolean randomNames) {
+        return spawnUserBot(location, count, spawner, bypassMax, botType, randomNames, 0);
+    }
+
+    public int spawnUserBot(
+            Location location,
+            int count,
+            Player spawner,
+            boolean bypassMax,
+            BotType botType,
+            boolean randomNames,
+            int spreadRadius) {
+        return spawnUserBot(location, count, spawner, bypassMax, botType, randomNames, spreadRadius, false);
+    }
+
+    public int spawnUserBot(
+            Location location,
+            int count,
+            Player spawner,
+            boolean bypassMax,
+            BotType botType,
+            boolean randomNames,
+            int spreadRadius,
+            boolean randomPositions) {
+        return spawnUserBot(
+                location, count, spawner, bypassMax, botType, randomNames, spreadRadius, randomPositions, null, false);
+    }
+
+    public int spawnUserBot(
+            Location location,
+            int count,
+            Player spawner,
+            boolean bypassMax,
+            BotType botType,
+            boolean randomNames,
+            int spreadRadius,
+            boolean randomPositions,
+            String maximumRank) {
+        return spawnUserBot(
+                location,
+                count,
+                spawner,
+                bypassMax,
+                botType,
+                randomNames,
+                spreadRadius,
+                randomPositions,
+                maximumRank,
+                false);
+    }
+
+    public int spawnUserBot(
+            Location location,
+            int count,
+            Player spawner,
+            boolean bypassMax,
+            BotType botType,
+            boolean randomNames,
+            int spreadRadius,
+            boolean randomPositions,
+            String maximumRank,
+            boolean godMode) {
+        return spawnUserBot(
+                location,
+                count,
+                spawner,
+                bypassMax,
+                botType,
+                randomNames,
+                spreadRadius,
+                randomPositions,
+                maximumRank,
+                godMode,
+                false);
+    }
+
+    public int spawnUserBot(
+            Location location,
+            int count,
+            Player spawner,
+            boolean bypassMax,
+            BotType botType,
+            boolean randomNames,
+            int spreadRadius,
+            boolean randomPositions,
+            String maximumRank,
+            boolean godMode,
+            boolean donutChat) {
         int maxBots = Config.maxBots();
         if (!bypassMax && maxBots > 0) {
             int available = maxBots - activePlayers.size();
@@ -885,26 +994,35 @@ public class FakePlayerManager {
 
         List<FakePlayer> batch = new ArrayList<>();
         for (int i = 0; i < count; i++) {
-            String name = nextSequentialName();
+            String name = randomNames ? nextRandomName() : nextSequentialName();
             if (name == null) break;
             UUID uuid = resolveUuid(name);
             PlayerProfile profile = Bukkit.createProfile(uuid, name);
             FakePlayer fp = new FakePlayer(uuid, name, profile);
             fp.setBotType(botType);
+            if (maximumRank != null) {
+                fp.setRankName(RankIntegration.chooseRank(maximumRank));
+            }
+            fp.setGodMode(godMode);
+            if (donutChat) fp.setMetadata(DonutChatController.METADATA_KEY, true);
 
             fp.setSkinName(spawnerName);
             applyDespawnSnapshotSkin(fp);
 
-            String rawUserName = Config.adminBotNameFormat().replace("{bot_name}", name);
+            String rawUserName = RankIntegration.decorateDisplayName(
+                    fp.getRankName(), Config.adminBotNameFormat().replace("{bot_name}", name));
             fp.setRawDisplayName(rawUserName);
             fp.setDisplayName(finalizeDisplayName(rawUserName, name));
-            fp.setSpawnLocation(location.clone());
+            Location botLocation = requestedSpawnLocation(location, i, count, spreadRadius, randomPositions);
+            fp.setSpawnLocation(botLocation);
+            if (randomPositions) {
+                fp.setMetadata("fpp.random-position", true);
+                fp.setMetadata("fpp.random-origin", location.clone());
+            }
             fp.setSpawnedBy(spawnerName, spawnerUuid);
             fp.setSpawnTick(System.currentTimeMillis());
-            activePlayers.put(uuid, fp);
-            nameIndex.put(name.toLowerCase(), fp);
+            if (!registerActiveBot(fp, true)) continue;
             batch.add(fp);
-            if (authManager != null) authManager.handleBotJoin(fp);
 
             if (db != null) {
                 BotRecord record = new BotRecord(
@@ -913,12 +1031,12 @@ public class FakePlayerManager {
                         uuid,
                         spawnerName,
                         spawnerUuid,
-                        location.getWorld() != null ? location.getWorld().getName() : "unknown",
-                        location.getX(),
-                        location.getY(),
-                        location.getZ(),
-                        location.getYaw(),
-                        location.getPitch(),
+                        botLocation.getWorld() != null ? botLocation.getWorld().getName() : "unknown",
+                        botLocation.getX(),
+                        botLocation.getY(),
+                        botLocation.getZ(),
+                        botLocation.getYaw(),
+                        botLocation.getPitch(),
                         Instant.now(),
                         null,
                         null);
@@ -940,12 +1058,155 @@ public class FakePlayerManager {
 
     public int spawn(
             Location location, int count, Player spawner, String customName, boolean bypassMax, BotType botType) {
-        return spawn(location, count, spawner, customName, bypassMax, botType, (UUID) null);
+        return spawn(location, count, spawner, customName, bypassMax, botType, false, 0, false, null);
+    }
+
+    public int spawn(
+            Location location,
+            int count,
+            Player spawner,
+            String customName,
+            boolean bypassMax,
+            BotType botType,
+            boolean randomNames) {
+        return spawn(location, count, spawner, customName, bypassMax, botType, randomNames, 0, false, null);
+    }
+
+    public int spawn(
+            Location location,
+            int count,
+            Player spawner,
+            String customName,
+            boolean bypassMax,
+            BotType botType,
+            boolean randomNames,
+            int spreadRadius) {
+        return spawn(location, count, spawner, customName, bypassMax, botType, randomNames, spreadRadius, false);
+    }
+
+    public int spawn(
+            Location location,
+            int count,
+            Player spawner,
+            String customName,
+            boolean bypassMax,
+            BotType botType,
+            boolean randomNames,
+            int spreadRadius,
+            boolean randomPositions) {
+        return spawn(
+                location,
+                count,
+                spawner,
+                customName,
+                bypassMax,
+                botType,
+                randomNames,
+                spreadRadius,
+                randomPositions,
+                null,
+                null,
+                false,
+                false);
+    }
+
+    public int spawn(
+            Location location,
+            int count,
+            Player spawner,
+            String customName,
+            boolean bypassMax,
+            BotType botType,
+            boolean randomNames,
+            int spreadRadius,
+            boolean randomPositions,
+            String maximumRank) {
+        return spawn(
+                location,
+                count,
+                spawner,
+                customName,
+                bypassMax,
+                botType,
+                randomNames,
+                spreadRadius,
+                randomPositions,
+                maximumRank,
+                false);
+    }
+
+    public int spawn(
+            Location location,
+            int count,
+            Player spawner,
+            String customName,
+            boolean bypassMax,
+            BotType botType,
+            boolean randomNames,
+            int spreadRadius,
+            boolean randomPositions,
+            String maximumRank,
+            boolean godMode) {
+        return spawn(
+                location,
+                count,
+                spawner,
+                customName,
+                bypassMax,
+                botType,
+                randomNames,
+                spreadRadius,
+                randomPositions,
+                maximumRank,
+                godMode,
+                false);
+    }
+
+    public int spawn(
+            Location location,
+            int count,
+            Player spawner,
+            String customName,
+            boolean bypassMax,
+            BotType botType,
+            boolean randomNames,
+            int spreadRadius,
+            boolean randomPositions,
+            String maximumRank,
+            boolean godMode,
+            boolean donutChat) {
+        return spawn(
+                location,
+                count,
+                spawner,
+                customName,
+                bypassMax,
+                botType,
+                randomNames,
+                spreadRadius,
+                randomPositions,
+                null,
+                maximumRank,
+                godMode,
+                donutChat);
     }
 
     public int spawn(
             Location location, int count, Player spawner, String customName, boolean bypassMax, UUID explicitUuid) {
-        return spawn(location, count, spawner, customName, bypassMax, BotType.AFK, explicitUuid);
+        return spawn(
+                location,
+                count,
+                spawner,
+                customName,
+                bypassMax,
+                BotType.AFK,
+                false,
+                0,
+                false,
+                explicitUuid,
+                null,
+                false,
+                false);
     }
 
     private int spawn(
@@ -955,7 +1216,13 @@ public class FakePlayerManager {
             String customName,
             boolean bypassMax,
             BotType botType,
-            UUID explicitUuid) {
+            boolean randomNames,
+            int spreadRadius,
+            boolean randomPositions,
+            UUID explicitUuid,
+            String maximumRank,
+            boolean godMode,
+            boolean donutChat) {
         int maxBots = Config.maxBots();
         if (!bypassMax && maxBots > 0) {
             int available = maxBots - activePlayers.size();
@@ -999,7 +1266,7 @@ public class FakePlayerManager {
                 baseName = customName;
                 name = customName;
             } else {
-                name = nextSequentialName();
+                name = randomNames ? nextRandomName() : nextSequentialName();
                 baseName = name;
             }
 
@@ -1017,22 +1284,30 @@ public class FakePlayerManager {
                 snapshotExplicitUuidPlayerData(fp);
             }
             fp.setBotType(botType);
+            if (maximumRank != null) {
+                fp.setRankName(RankIntegration.chooseRank(maximumRank));
+            }
+            fp.setGodMode(godMode);
+            if (donutChat) fp.setMetadata(DonutChatController.METADATA_KEY, true);
 
             fp.setSkinName(baseName != null ? baseName : name);
             applyDespawnSnapshotSkin(fp);
 
-            String rawAdminName = Config.adminBotNameFormat().replace("{bot_name}", name);
+            String rawAdminName = RankIntegration.decorateDisplayName(
+                    fp.getRankName(), Config.adminBotNameFormat().replace("{bot_name}", name));
             fp.setRawDisplayName(rawAdminName);
             String displayName = finalizeDisplayName(rawAdminName, name);
             fp.setDisplayName(displayName);
-            fp.setSpawnLocation(location.clone());
+            Location botLocation = requestedSpawnLocation(location, i, count, spreadRadius, randomPositions);
+            fp.setSpawnLocation(botLocation);
+            if (randomPositions) {
+                fp.setMetadata("fpp.random-position", true);
+                fp.setMetadata("fpp.random-origin", location.clone());
+            }
             fp.setSpawnedBy(spawnerName, spawnerUuid);
             fp.setSpawnTick(System.currentTimeMillis());
-            usedNames.add(name);
-            activePlayers.put(uuid, fp);
-            nameIndex.put(name.toLowerCase(), fp);
+            if (!registerActiveBot(fp, customName == null)) continue;
             batch.add(fp);
-            if (authManager != null) authManager.handleBotJoin(fp);
 
             if (db != null) {
                 BotRecord record = new BotRecord(
@@ -1041,12 +1316,12 @@ public class FakePlayerManager {
                         uuid,
                         spawnerName,
                         spawnerUuid,
-                        location.getWorld() != null ? location.getWorld().getName() : "unknown",
-                        location.getX(),
-                        location.getY(),
-                        location.getZ(),
-                        location.getYaw(),
-                        location.getPitch(),
+                        botLocation.getWorld() != null ? botLocation.getWorld().getName() : "unknown",
+                        botLocation.getX(),
+                        botLocation.getY(),
+                        botLocation.getZ(),
+                        botLocation.getYaw(),
+                        botLocation.getPitch(),
                         Instant.now(),
                         null,
                         null);
@@ -1067,6 +1342,60 @@ public class FakePlayerManager {
         }
         return total;
     }
+
+    private static Location requestedSpawnLocation(
+            Location center, int index, int count, int spreadRadius, boolean randomPositions) {
+        if (randomPositions) return randomSpawnLocation(center);
+        if (spreadRadius <= 0 || count <= 1) return center.clone();
+
+        double angle = (Math.PI * 2.0 * index / count) - (Math.PI / 2.0);
+        return center.clone().add(Math.cos(angle) * spreadRadius, 0.0, Math.sin(angle) * spreadRadius);
+    }
+
+    private static Location randomSpawnLocation(Location center) {
+        World world = center.getWorld();
+        if (world == null) return center.clone();
+
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        var border = world.getWorldBorder();
+        RandomSpawnBounds bounds = randomSpawnBounds(
+                border.getSize(), border.getCenter().getX(), border.getCenter().getZ());
+        double x = bounds.minX();
+        double z = bounds.minZ();
+        for (int attempt = 0; attempt < RANDOM_SPAWN_INTERIOR_ROLLS; attempt++) {
+            x = randomCoordinate(random, bounds.minX(), bounds.maxX());
+            z = randomCoordinate(random, bounds.minZ(), bounds.maxZ());
+            if (isInteriorChunkColumn((int) Math.floor(x), (int) Math.floor(z))) break;
+        }
+
+        return new Location(
+                world, Math.floor(x) + 0.5, center.getY(), Math.floor(z) + 0.5, center.getYaw(), center.getPitch());
+    }
+
+    private static double randomCoordinate(ThreadLocalRandom random, double min, double max) {
+        return max > min ? random.nextDouble(min, max) : min;
+    }
+
+    static boolean isInteriorChunkColumn(int blockX, int blockZ) {
+        int localX = Math.floorMod(blockX, 16);
+        int localZ = Math.floorMod(blockZ, 16);
+        return localX > 0 && localX < 15 && localZ > 0 && localZ < 15;
+    }
+
+    static RandomSpawnBounds randomSpawnBounds(double borderSize, double borderCenterX, double borderCenterZ) {
+        boolean configuredBorder = usesWorldBorderForRandomSpawn(borderSize);
+        double size = configuredBorder ? borderSize : DEFAULT_WORLD_BORDER_SIZE;
+        double centerX = configuredBorder ? borderCenterX : 0.0;
+        double centerZ = configuredBorder ? borderCenterZ : 0.0;
+        double halfSize = Math.max(0.0, size / 2.0 - RANDOM_SPAWN_BORDER_MARGIN);
+        return new RandomSpawnBounds(centerX - halfSize, centerX + halfSize, centerZ - halfSize, centerZ + halfSize);
+    }
+
+    static boolean usesWorldBorderForRandomSpawn(double borderSize) {
+        return Double.isFinite(borderSize) && borderSize > 0.0 && borderSize < DEFAULT_WORLD_BORDER_SIZE;
+    }
+
+    record RandomSpawnBounds(double minX, double maxX, double minZ, double maxZ) {}
 
     public int spawnBodyless(
             Location location, int count, Player spawner, String customName, boolean bypassMax, boolean spawnBodyless) {
@@ -1099,38 +1428,369 @@ public class FakePlayerManager {
     }
 
     private void visualChain(List<FakePlayer> batch, int index, Location location) {
-        if (batch == null) return;
+        if (batch == null || index >= batch.size()) return;
 
+        FakePlayer fp = batch.get(index);
+        Location spawnLoc =
+                fp.getSpawnLocation() != null ? fp.getSpawnLocation().clone() : location.clone();
         boolean folia = NmsPlayerSpawner.isFoliaServer();
-        int batchSize = folia ? 2 : 6;
-        int end = Math.min(batch.size(), index + batchSize);
-        for (int i = index; i < end; i++) {
-            FakePlayer fp = batch.get(i);
-            if (activePlayers.containsKey(fp.getUuid())) {
-                Location spawnLoc =
-                        fp.getSpawnLocation() != null ? fp.getSpawnLocation().clone() : location.clone();
+        if (folia) {
+            FppScheduler.runAtLocation(plugin, spawnLoc, () -> {
+                if (activePlayers.get(fp.getUuid()) == fp) finishSpawn(fp, spawnLoc);
+            });
+        } else {
+            if (activePlayers.get(fp.getUuid()) == fp) {
                 finishSpawn(fp, spawnLoc);
             }
         }
-        if (end < batch.size()) {
-            int next = end;
-            long delay = 1L;
-            FppScheduler.runSyncLater(
-                    plugin,
-                    () -> {
-                        if (folia) {
-                            FppScheduler.runAtLocation(plugin, location, () -> visualChain(batch, next, location));
-                        } else {
-                            visualChain(batch, next, location);
-                        }
-                    },
-                    delay);
+
+        int next = index + 1;
+        if (next < batch.size()) {
+            FppScheduler.runSyncLater(plugin, () -> visualChain(batch, next, location), Config.bulkSpawnDelayTicks());
         }
     }
 
     private void finishSpawn(FakePlayer fp, Location spawnLoc) {
+        UUID botUuid = fp.getUuid();
+        if (!initialSpawnPending.remove(botUuid)) {
+            Config.debug("Initial spawn callback already consumed for '" + fp.getName() + "'; duplicate ignored.");
+            return;
+        }
+        // registerActiveBot reserves this lock before the bot becomes visible to validators. Keep
+        // the fallback for restored/legacy call paths, but only this consumed initial-spawn token
+        // is allowed to own it.
+        bodySpawnInProgress.add(botUuid);
         fp.setSpawnTime(Instant.now());
-        spawnBodyAndFinish(fp, spawnLoc);
+        if (Boolean.TRUE.equals(fp.getMetadata("fpp.random-position"))) {
+            Object rawOrigin = fp.getMetadata("fpp.random-origin");
+            Location origin = rawOrigin instanceof Location location ? location.clone() : spawnLoc.clone();
+            trySafeRandomSpawn(fp, origin, spawnLoc.clone(), 1);
+            return;
+        }
+        spawnBodyAndFinishClaimed(fp, spawnLoc);
+    }
+
+    private void trySafeRandomSpawn(FakePlayer fp, Location origin, Location candidate, int attempt) {
+        runAfterSpawnChunkLoad(fp, candidate, chunkLoaded -> {
+            if (activePlayers.get(fp.getUuid()) != fp) return;
+
+            Location safeLocation = chunkLoaded ? resolveRandomSurfaceLocation(candidate) : null;
+            if (safeLocation != null) {
+                completeSafeRandomSpawn(fp, safeLocation);
+                return;
+            }
+
+            if (attempt < MAX_SAFE_RANDOM_SPAWN_ATTEMPTS) {
+                trySafeRandomSpawn(fp, origin, randomSpawnLocation(origin), attempt + 1);
+                return;
+            }
+
+            Location fallback = origin.getWorld() != null
+                    ? origin.getWorld().getSpawnLocation().clone()
+                    : origin.clone();
+            fallback.setYaw(origin.getYaw());
+            fallback.setPitch(origin.getPitch());
+            trySafeRandomSpawnFallback(fp, fallback);
+        });
+    }
+
+    private void trySafeRandomSpawnFallback(FakePlayer fp, Location fallback) {
+        runAfterSpawnChunkLoad(fp, fallback, chunkLoaded -> {
+            if (activePlayers.get(fp.getUuid()) != fp) return;
+
+            Location safeFallback = chunkLoaded ? resolveRandomSurfaceLocation(fallback) : null;
+            if (safeFallback != null) {
+                completeSafeRandomSpawn(fp, safeFallback);
+                return;
+            }
+
+            FppLogger.warn("Random-position spawn aborted for '"
+                    + fp.getName()
+                    + "': no safe location found after "
+                    + MAX_SAFE_RANDOM_SPAWN_ATTEMPTS
+                    + " attempts and the world spawn was unsafe.");
+            delete(fp.getName(), "no_safe_random_spawn_location");
+        });
+    }
+
+    private void runAfterSpawnChunkLoad(FakePlayer fp, Location candidate, Consumer<Boolean> continuation) {
+        // A random-position retry may move this bot to a different chunk. Drop the previous
+        // candidate lease before loading the next one; the selected candidate remains pinned
+        // until body creation finishes.
+        releaseSpawnChunkLease(fp);
+        // Submit every request immediately. Paper/Folia's chunk system owns admission control and
+        // may use all currently available generation capacity; FPP does not impose a parallel cap.
+        startRandomSpawnChunkLoad(fp, candidate, continuation, () -> {});
+    }
+
+    private void startRandomSpawnChunkLoad(
+            FakePlayer fp, Location candidate, Consumer<Boolean> continuation, Runnable finished) {
+        if (!isCurrentActiveBot(fp)) {
+            finished.run();
+            return;
+        }
+        try {
+            FppScheduler.runAtLocation(plugin, candidate, () -> {
+                if (!isCurrentActiveBot(fp)) {
+                    finished.run();
+                    return;
+                }
+
+                World world = candidate.getWorld();
+                if (world == null) {
+                    completeRandomSpawnChunkLoad(fp, continuation, false, finished);
+                    return;
+                }
+
+                int chunkX = candidate.getBlockX() >> 4;
+                int chunkZ = candidate.getBlockZ() >> 4;
+                if (world.isChunkLoaded(chunkX, chunkZ)) {
+                    boolean retained = retainSpawnChunkLease(fp, world, chunkX, chunkZ);
+                    completeRandomSpawnChunkLoad(fp, continuation, retained, finished);
+                    return;
+                }
+                try {
+                    world.getChunkAtAsync(chunkX, chunkZ, true, true).whenComplete((chunk, error) -> {
+                        if (!isCurrentActiveBot(fp)) {
+                            finished.run();
+                            return;
+                        }
+                        boolean retained =
+                                error == null && chunk != null && retainSpawnChunkLease(fp, world, chunkX, chunkZ);
+                        try {
+                            FppScheduler.runAtLocation(plugin, candidate, () -> {
+                                if (!isCurrentActiveBot(fp)) {
+                                    releaseSpawnChunkLease(fp);
+                                    finished.run();
+                                    return;
+                                }
+                                if (error != null) {
+                                    FppLogger.debug("Spawn chunk load failed for '"
+                                            + fp.getName()
+                                            + "' at ["
+                                            + chunkX
+                                            + ", "
+                                            + chunkZ
+                                            + "]: "
+                                            + error.getClass().getSimpleName()
+                                            + ": "
+                                            + error.getMessage());
+                                }
+                                completeRandomSpawnChunkLoad(fp, continuation, retained, finished);
+                            });
+                        } catch (Throwable schedulingError) {
+                            releaseSpawnChunkLease(fp);
+                            abortRandomSpawnChunkLoad(fp, schedulingError, finished);
+                        }
+                    });
+                } catch (Throwable error) {
+                    FppLogger.debug("Spawn chunk load could not be started for '"
+                            + fp.getName()
+                            + "' at ["
+                            + chunkX
+                            + ", "
+                            + chunkZ
+                            + "]: "
+                            + error.getClass().getSimpleName()
+                            + ": "
+                            + error.getMessage());
+                    completeRandomSpawnChunkLoad(fp, continuation, false, finished);
+                }
+            });
+        } catch (Throwable schedulingError) {
+            abortRandomSpawnChunkLoad(fp, schedulingError, finished);
+        }
+    }
+
+    private boolean isCurrentActiveBot(FakePlayer fp) {
+        return plugin.isEnabled() && fp != null && activePlayers.get(fp.getUuid()) == fp;
+    }
+
+    private synchronized boolean retainSpawnChunkLease(FakePlayer fp, World world, int chunkX, int chunkZ) {
+        if (!isCurrentActiveBot(fp) || chunkLoader == null) return false;
+
+        SpawnChunkLease requested = new SpawnChunkLease(world, chunkX, chunkZ);
+        SpawnChunkLease existing = spawnChunkLeases.get(fp.getUuid());
+        if (requested.sameChunk(existing)) return world.isChunkLoaded(chunkX, chunkZ);
+
+        if (!chunkLoader.retainLoadedSpawnTicket(fp, world, chunkX, chunkZ)) return false;
+        if (!isCurrentActiveBot(fp)) {
+            chunkLoader.releaseSpawnTicket(world, chunkX, chunkZ);
+            return false;
+        }
+        SpawnChunkLease replaced = spawnChunkLeases.put(fp.getUuid(), requested);
+        if (replaced != null) chunkLoader.releaseSpawnTicket(replaced.world(), replaced.chunkX(), replaced.chunkZ());
+        return true;
+    }
+
+    private synchronized void releaseSpawnChunkLease(FakePlayer fp) {
+        if (fp == null) return;
+        SpawnChunkLease lease = spawnChunkLeases.remove(fp.getUuid());
+        if (lease != null && chunkLoader != null) {
+            chunkLoader.releaseSpawnTicket(lease.world(), lease.chunkX(), lease.chunkZ());
+        }
+    }
+
+    private void completeRandomSpawnChunkLoad(
+            FakePlayer fp, Consumer<Boolean> continuation, boolean loaded, Runnable finished) {
+        try {
+            if (isCurrentActiveBot(fp)) continuation.accept(loaded);
+        } catch (Throwable continuationError) {
+            FppLogger.warn("Spawn chunk-load continuation failed for '"
+                    + fp.getName()
+                    + "': "
+                    + continuationError.getClass().getSimpleName()
+                    + ": "
+                    + continuationError.getMessage());
+            if (activePlayers.get(fp.getUuid()) == fp) {
+                delete(fp.getName(), "random_spawn_continuation_failed");
+            }
+        } finally {
+            finished.run();
+        }
+    }
+
+    private void abortRandomSpawnChunkLoad(FakePlayer fp, Throwable error, Runnable finished) {
+        releaseSpawnChunkLease(fp);
+        FppLogger.debug("Spawn chunk-load scheduler failed for '"
+                + fp.getName()
+                + "': "
+                + error.getClass().getSimpleName()
+                + ": "
+                + error.getMessage());
+        try {
+            if (plugin.isEnabled()) {
+                FppScheduler.runSync(plugin, () -> {
+                    if (activePlayers.get(fp.getUuid()) == fp) {
+                        delete(fp.getName(), "random_spawn_scheduler_failed");
+                    }
+                });
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            finished.run();
+        }
+    }
+
+    private void completeSafeRandomSpawn(FakePlayer fp, Location safeLocation) {
+        fp.removeMetadata("fpp.random-origin");
+        fp.setSpawnLocation(safeLocation.clone());
+        if (db != null && safeLocation.getWorld() != null) {
+            db.updateLastLocation(
+                    fp.getUuid(),
+                    safeLocation.getWorld().getName(),
+                    safeLocation.getX(),
+                    safeLocation.getY(),
+                    safeLocation.getZ(),
+                    safeLocation.getYaw(),
+                    safeLocation.getPitch());
+        }
+        spawnBodyAndFinishClaimed(fp, safeLocation);
+    }
+
+    @Nullable
+    private Location resolveRandomSurfaceLocation(Location requested) {
+        World world = requested.getWorld();
+        if (world == null) return null;
+
+        int x = requested.getBlockX();
+        int z = requested.getBlockZ();
+        if (!world.isChunkLoaded(x >> 4, z >> 4)) return null;
+
+        Location resolved = resolveRandomSurfaceColumn(world, x, z, requested);
+        if (resolved != null) return resolved;
+
+        int chunkBaseX = x & ~15;
+        int chunkBaseZ = z & ~15;
+        for (int[] probe : RANDOM_SPAWN_COLUMN_PROBES) {
+            int probeX = chunkBaseX + probe[0];
+            int probeZ = chunkBaseZ + probe[1];
+            if (probeX == x && probeZ == z) continue;
+            resolved = resolveRandomSurfaceColumn(world, probeX, probeZ, requested);
+            if (resolved != null) return resolved;
+        }
+        return null;
+    }
+
+    @Nullable
+    private Location resolveRandomSurfaceColumn(World world, int x, int z, Location requested) {
+        int y;
+        if (world.getEnvironment() == World.Environment.NETHER) {
+            y = findNearestStandableY(world, x, z, requested.getBlockY());
+        } else {
+            int surfaceY = world.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES);
+            y = Math.min(world.getMaxHeight() - 2, surfaceY + 1);
+        }
+
+        Location resolved = new Location(world, x + 0.5, y, z + 0.5, requested.getYaw(), requested.getPitch());
+        if (y >= world.getMinHeight() + 1 && isSafeRandomSpawn(resolved)) return resolved;
+        return null;
+    }
+
+    private int findNearestStandableY(World world, int x, int z, int preferredY) {
+        int minY = world.getMinHeight() + 1;
+        int maxY = world.getMaxHeight() - 2;
+        int centerY = Math.max(minY, Math.min(maxY, preferredY));
+        int maxDistance = Math.max(centerY - minY, maxY - centerY);
+        for (int distance = 0; distance <= maxDistance; distance++) {
+            int above = centerY + distance;
+            if (above <= maxY && isStandableRandomSpawn(world, x, above, z)) {
+                Location candidate = new Location(world, x + 0.5, above, z + 0.5);
+                if (isSafeRandomSpawn(candidate)) return above;
+            }
+            int below = centerY - distance;
+            if (distance > 0 && below >= minY && isStandableRandomSpawn(world, x, below, z)) {
+                Location candidate = new Location(world, x + 0.5, below, z + 0.5);
+                if (isSafeRandomSpawn(candidate)) return below;
+            }
+        }
+        return centerY;
+    }
+
+    private static boolean isStandableRandomSpawn(World world, int x, int y, int z) {
+        Block feet = world.getBlockAt(x, y, z);
+        Block head = world.getBlockAt(x, y + 1, z);
+        Block floor = world.getBlockAt(x, y - 1, z);
+        return feet.isPassable()
+                && head.isPassable()
+                && !feet.isLiquid()
+                && !head.isLiquid()
+                && !floor.isLiquid()
+                && floor.getType().isSolid()
+                && !floor.isPassable();
+    }
+
+    private boolean isSafeRandomSpawn(Location location) {
+        World world = location.getWorld();
+        if (world == null
+                || location.getY() < world.getMinHeight() + 1
+                || location.getY() > world.getMaxHeight() - 2
+                || !world.getWorldBorder().isInside(location)) {
+            return false;
+        }
+
+        Block feet = location.getBlock();
+        Block head = feet.getRelative(0, 1, 0);
+        Block floor = feet.getRelative(0, -1, 0);
+        int chunkLocalX = Math.floorMod(feet.getX(), 16);
+        int chunkLocalZ = Math.floorMod(feet.getZ(), 16);
+        if (chunkLocalX == 0 || chunkLocalX == 15 || chunkLocalZ == 0 || chunkLocalZ == 15) return false;
+        if (!feet.isPassable() || !head.isPassable()) return false;
+        if (feet.isLiquid() || head.isLiquid() || floor.isLiquid()) return false;
+        if (!floor.getType().isSolid() || floor.isPassable()) return false;
+
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    if (isDangerousSpawnMaterial(feet.getRelative(dx, dy, dz).getType())) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    static boolean isDangerousSpawnMaterial(Material material) {
+        return material != null && DANGEROUS_SPAWN_MATERIALS.contains(material);
     }
 
     private int computeInitialPing(FakePlayer fp) {
@@ -1221,196 +1881,265 @@ public class FakePlayerManager {
         return worldFolder.toPath().resolve("playerdata").resolve(uuid + ".dat");
     }
 
-    private void spawnBodyAndFinish(FakePlayer fp, Location spawnLoc) {
+    private void spawnBodyAndFinishClaimed(FakePlayer fp, Location spawnLoc) {
+        UUID botUuid = fp.getUuid();
 
-        FakePlayerBody.resolveAndFinish(
-                plugin,
-                fp,
-                spawnLoc,
-                () -> {
-                    if (!activePlayers.containsKey(fp.getUuid())) {
-                        Config.debug("finishSpawn aborted for '"
-                                + fp.getName()
-                                + "' - removed before body spawn callback fired.");
-                        return;
-                    }
+        if (spawnLoc == null || spawnLoc.getWorld() == null) {
+            FppLogger.warn("Bot spawn aborted for '" + fp.getName() + "': target world is unavailable.");
+            delete(fp.getName(), "spawn_world_unavailable");
+            bodySpawnInProgress.remove(botUuid);
+            return;
+        }
 
-                    int initialPing = computeInitialPing(fp);
+        if (fp.isBodyless()) {
+            spawnBodyInLoadedChunkAndFinishClaimed(fp, spawnLoc);
+            return;
+        }
 
-                    if (!fp.isBodyless()) {
-                        Player body = FakePlayerBody.spawn(fp, spawnLoc, initialPing);
-                        if (body != null) {
-                            stampFakePlayerMarker(body, fp);
-                            protectRequestedSpawnLocation(fp, body, spawnLoc.clone());
-                            fp.setPacketProfileName(fp.getName());
-                            // Ping was already set on the NMS ServerPlayer before placeNewPlayer,
-                            // but update it again here in case the pre-spawn set didn't take effect.
-                            NmsPlayerSpawner.setPing(body, fp.getEffectivePing());
+        World world = spawnLoc.getWorld();
+        int chunkX = spawnLoc.getBlockX() >> 4;
+        int chunkZ = spawnLoc.getBlockZ() >> 4;
+        if (world.isChunkLoaded(chunkX, chunkZ)) {
+            spawnBodyInLoadedChunkAndFinishClaimed(fp, spawnLoc);
+            return;
+        }
 
-                            final Player savedBody = body;
-                            final String savedName = fp.getName();
-                            final UUID savedUuid = fp.getUuid();
-                            final Path playerDataPath = explicitUuidPlayerDataFile(savedUuid);
-                            final boolean skipPlayerDataSave =
-                                    isExplicitUuidSpawn(fp) || (playerDataPath != null && Files.exists(playerDataPath));
-                            if (wasExplicitUuidOp(fp)) {
-                                try {
-                                    savedBody.setOp(true);
-                                } catch (Throwable ignored) {
-                                }
-                            }
-                            long initialSaveDelay = 40L + Math.floorMod(savedUuid.hashCode(), 40);
-                            FppScheduler.runAtEntityLaterWithId(
-                                    plugin,
-                                    savedBody,
-                                    () -> {
-                                        if (!savedBody.isOnline()) return;
-                                        if (skipPlayerDataSave) {
-                                            FppLogger.debug(
-                                                    "FakePlayerManager: skipped initial playerdata save for bot '"
-                                                            + savedName
-                                                            + "' uuid="
-                                                            + savedUuid);
-                                            return;
-                                        }
-                                        try {
+        runAfterSpawnChunkLoad(fp, spawnLoc.clone(), chunkLoaded -> {
+            if (activePlayers.get(botUuid) != fp) {
+                bodySpawnInProgress.remove(botUuid);
+                return;
+            }
+            if (!chunkLoaded) {
+                FppLogger.warn("Bot spawn aborted for '"
+                        + fp.getName()
+                        + "': target chunk ["
+                        + chunkX
+                        + ", "
+                        + chunkZ
+                        + "] could not be loaded.");
+                delete(fp.getName(), "spawn_chunk_load_failed");
+                bodySpawnInProgress.remove(botUuid);
+                return;
+            }
+            spawnBodyInLoadedChunkAndFinishClaimed(fp, spawnLoc);
+        });
+    }
 
-                                            PlayerJoinListener.stampFirstPlayed(savedBody);
-                                            savedBody.saveData();
-                                            FppLogger.debug("FakePlayerManager: initial playerdata"
-                                                    + " saved for '"
-                                                    + savedName
-                                                    + "' uuid="
-                                                    + savedUuid);
-                                        } catch (Exception e) {
-                                            FppLogger.warn("FakePlayerManager: initial saveData"
-                                                    + " failed for '"
-                                                    + savedName
-                                                    + "' uuid="
-                                                    + savedUuid
-                                                    + ": "
-                                                    + e.getMessage());
-                                        }
-                                    },
-                                    initialSaveDelay);
-                        } else {
-                            FppLogger.warn("finishSpawn: body spawn failed for '"
-                                    + fp.getName()
-                                    + "' - rolling back bot to avoid ghost keepalive connection.");
-                            delete(fp.getName(), "spawn_body_failed");
+    private void spawnBodyInLoadedChunkAndFinishClaimed(FakePlayer fp, Location spawnLoc) {
+        UUID botUuid = fp.getUuid();
+
+        Runnable[] finishBodySpawn = new Runnable[1];
+        finishBodySpawn[0] = () -> {
+            if (activePlayers.get(botUuid) != fp) {
+                Config.debug(
+                        "finishSpawn aborted for '" + fp.getName() + "' - removed before body spawn callback fired.");
+                bodySpawnInProgress.remove(botUuid);
+                return;
+            }
+
+            if (!fp.isBodyless()) {
+                World world = spawnLoc.getWorld();
+                int chunkX = spawnLoc.getBlockX() >> 4;
+                int chunkZ = spawnLoc.getBlockZ() >> 4;
+                if (world == null || !world.isChunkLoaded(chunkX, chunkZ)) {
+                    runAfterSpawnChunkLoad(fp, spawnLoc.clone(), chunkLoaded -> {
+                        if (activePlayers.get(botUuid) != fp) {
+                            bodySpawnInProgress.remove(botUuid);
                             return;
                         }
-                    } else if (fp.isBodyless()) {
+                        if (!chunkLoaded) {
+                            FppLogger.warn("Bot spawn aborted for '"
+                                    + fp.getName()
+                                    + "': target chunk ["
+                                    + chunkX
+                                    + ", "
+                                    + chunkZ
+                                    + "] unloaded before body creation and could not be reloaded.");
+                            delete(fp.getName(), "spawn_chunk_reload_failed");
+                            bodySpawnInProgress.remove(botUuid);
+                            return;
+                        }
+                        finishBodySpawn[0].run();
+                    });
+                    return;
+                }
+            }
 
-                        Config.debug("Bodyless spawn: skipping physical body for " + fp.getName());
-                    }
+            int initialPing = computeInitialPing(fp);
 
-                    if (Config.tabListEnabled()) {
-                        boolean isNmsPlayer = fp.getPlayer() != null;
-                        Config.debug("Sending tab-list for '"
-                                + fp.getName()
-                                + "' display='"
-                                + fp.getDisplayName()
-                                + "' packet='"
-                                + fp.getPacketProfileName()
-                                + "' nms="
-                                + isNmsPlayer);
+            if (!fp.isBodyless()) {
+                Player body = FakePlayerBody.spawn(fp, spawnLoc, initialPing);
+                if (body != null) {
+                    stampFakePlayerMarker(body, fp);
+                    protectRequestedSpawnLocation(fp, body, spawnLoc.clone());
+                    fp.setPacketProfileName(fp.getName());
+                    // Ping was already set on the NMS ServerPlayer before placeNewPlayer,
+                    // but update it again here in case the pre-spawn set didn't take effect.
+                    NmsPlayerSpawner.setPing(body, fp.getEffectivePing());
 
-                        long tabAddDelay = 2L + Math.floorMod(fp.getUuid().hashCode(), 8);
-                        FppScheduler.runSyncLater(
-                                plugin,
-                                () -> {
-                                    if (!activePlayers.containsKey(fp.getUuid())) return;
-                                    for (Player p : Bukkit.getOnlinePlayers()) PacketHelper.sendTabListAdd(p, fp);
-                                    if (fp.hasCustomPing() || fp.isPingSimulated()) {
-                                        for (Player p : Bukkit.getOnlinePlayers()) {
-                                            PacketHelper.sendTabListLatencyUpdate(p, fp);
-                                        }
-                                    }
-                                },
-                                tabAddDelay);
-
-                        FppScheduler.runSyncLater(
-                                plugin,
-                                () -> {
-                                    if (!activePlayers.containsKey(fp.getUuid())) return;
-                                    boolean nms = fp.getPlayer() != null;
-                                    Config.debug("Re-sending tab-list display-name (3t) for '" + fp.getName() + "' nms="
-                                            + nms);
-                                    for (Player p : Bukkit.getOnlinePlayers())
-                                        PacketHelper.sendTabListDisplayNameUpdate(p, fp);
-                                },
-                                tabAddDelay + 8L);
-
-                        FppScheduler.runSyncLater(
-                                plugin,
-                                () -> {
-                                    if (!activePlayers.containsKey(fp.getUuid())) return;
-                                    Config.debug("Finalising tab-list for '" + fp.getName() + "'");
-
-                                    var vc = plugin.getVelocityChannel();
-                                    if (vc != null) vc.broadcastBotSpawn(fp);
-                                },
-                                tabAddDelay + 20L);
-                    } else {
-                        Config.debug("Tab-list disabled - unlisting '" + fp.getName() + "'");
-
-                        Player bot = fp.getPlayer();
-                        if (bot != null) NmsPlayerSpawner.setListed(bot, false);
-
-                        FppScheduler.runSyncLater(
-                                plugin,
-                                () -> {
-                                    if (!activePlayers.containsKey(fp.getUuid())) return;
-                                    for (Player p : Bukkit.getOnlinePlayers()) {
-                                        PacketHelper.sendTabListUpdateListed(p, fp, false);
-                                    }
-
-                                    var vc = plugin.getVelocityChannel();
-                                    if (vc != null) vc.broadcastBotSpawn(fp);
-                                },
-                                3L);
-                    }
-
-                    if (persistence != null && Config.persistOnRestart() && !restorationInProgress) {
-                        persistence.saveActiveListAsync(activePlayers.values());
-                    }
-
-                    // Restore inventory+XP from a prior manual despawn of the same bot name.
-                    DespawnSnapshot despawnSnap =
-                            despawnSnapshots.remove(fp.getName().toLowerCase());
-                    if (despawnSnap != null) {
-                        removeDespawnSnapshotPersistent(fp.getName().toLowerCase());
-                        final UUID snapBotUuid = fp.getUuid();
-                        FppScheduler.runSyncLater(
-                                plugin,
-                                () -> {
-                                    FakePlayer restoredFp = getByUuid(snapBotUuid);
-                                    if (restoredFp == null) return;
-                                    Player restoredBot = restoredFp.getPlayer();
-                                    if (restoredBot == null || !restoredBot.isValid()) return;
-                                    applyDespawnSnapshot(restoredBot, despawnSnap);
-                                    Config.debug("[DespawnSnapshot] Restored inventory+XP to '" + restoredFp.getName()
-                                            + "'.");
-                                },
-                                5L);
-                    }
-
-                    // Fire API spawn event.
-                    var fppApi = plugin.getFppApi();
-                    if (fppApi != null) {
-                        FppBotSpawnEvent spawnEvt = new FppBotSpawnEvent(new FppBotImpl(fp), fp.isRestoredSpawn());
-                        Bukkit.getPluginManager().callEvent(spawnEvt);
-                    }
-                },
-                () -> {
-                    if (!activePlayers.containsKey(fp.getUuid())) return;
-                    if (Config.tabListEnabled()) {
-                        for (Player p : Bukkit.getOnlinePlayers()) {
-                            PacketHelper.sendTabListDisplayNameUpdate(p, fp);
+                    final Player savedBody = body;
+                    final String savedName = fp.getName();
+                    final UUID savedUuid = fp.getUuid();
+                    final Path playerDataPath = explicitUuidPlayerDataFile(savedUuid);
+                    final boolean skipPlayerDataSave =
+                            isExplicitUuidSpawn(fp) || (playerDataPath != null && Files.exists(playerDataPath));
+                    if (wasExplicitUuidOp(fp)) {
+                        try {
+                            savedBody.setOp(true);
+                        } catch (Throwable ignored) {
                         }
                     }
-                });
+                    long initialSaveDelay = 40L + Math.floorMod(savedUuid.hashCode(), 40);
+                    FppScheduler.runAtEntityLaterWithId(
+                            plugin,
+                            savedBody,
+                            () -> {
+                                if (!savedBody.isOnline()) return;
+                                if (skipPlayerDataSave) {
+                                    FppLogger.debug("FakePlayerManager: skipped initial playerdata save for bot '"
+                                            + savedName
+                                            + "' uuid="
+                                            + savedUuid);
+                                    return;
+                                }
+                                try {
+
+                                    PlayerJoinListener.stampFirstPlayed(savedBody);
+                                    savedBody.saveData();
+                                    FppLogger.debug("FakePlayerManager: initial playerdata"
+                                            + " saved for '"
+                                            + savedName
+                                            + "' uuid="
+                                            + savedUuid);
+                                } catch (Exception e) {
+                                    FppLogger.warn("FakePlayerManager: initial saveData"
+                                            + " failed for '"
+                                            + savedName
+                                            + "' uuid="
+                                            + savedUuid
+                                            + ": "
+                                            + e.getMessage());
+                                }
+                            },
+                            initialSaveDelay);
+                } else {
+                    FppLogger.warn("finishSpawn: body spawn failed for '"
+                            + fp.getName()
+                            + "' - rolling back bot to avoid ghost keepalive connection.");
+                    delete(fp.getName(), "spawn_body_failed");
+                    bodySpawnInProgress.remove(botUuid);
+                    return;
+                }
+            } else if (fp.isBodyless()) {
+
+                Config.debug("Bodyless spawn: skipping physical body for " + fp.getName());
+            }
+
+            if (Config.tabListEnabled()) {
+                boolean isNmsPlayer = fp.getPlayer() != null;
+                Config.debug("Sending tab-list for '"
+                        + fp.getName()
+                        + "' display='"
+                        + fp.getDisplayName()
+                        + "' packet='"
+                        + fp.getPacketProfileName()
+                        + "' nms="
+                        + isNmsPlayer);
+
+                long tabAddDelay = 2L + Math.floorMod(fp.getUuid().hashCode(), 8);
+                FppScheduler.runSyncLater(
+                        plugin,
+                        () -> {
+                            if (!activePlayers.containsKey(fp.getUuid())) return;
+                            for (Player p : cachedOnlinePlayers) PacketHelper.sendTabListAdd(p, fp);
+                            if (fp.hasCustomPing() || fp.isPingSimulated()) {
+                                for (Player p : cachedOnlinePlayers) {
+                                    PacketHelper.sendTabListLatencyUpdate(p, fp);
+                                }
+                            }
+                        },
+                        tabAddDelay);
+
+                FppScheduler.runSyncLater(
+                        plugin,
+                        () -> {
+                            if (!activePlayers.containsKey(fp.getUuid())) return;
+                            boolean nms = fp.getPlayer() != null;
+                            Config.debug("Re-sending tab-list display-name (3t) for '" + fp.getName() + "' nms=" + nms);
+                            for (Player p : cachedOnlinePlayers) PacketHelper.sendTabListDisplayNameUpdate(p, fp);
+                        },
+                        tabAddDelay + 8L);
+
+                FppScheduler.runSyncLater(
+                        plugin,
+                        () -> {
+                            if (!activePlayers.containsKey(fp.getUuid())) return;
+                            Config.debug("Finalising tab-list for '" + fp.getName() + "'");
+
+                            var vc = plugin.getVelocityChannel();
+                            if (vc != null) vc.broadcastBotSpawn(fp);
+                        },
+                        tabAddDelay + 20L);
+            } else {
+                Config.debug("Tab-list disabled - unlisting '" + fp.getName() + "'");
+
+                Player bot = fp.getPlayer();
+                if (bot != null) NmsPlayerSpawner.setListed(bot, false);
+
+                FppScheduler.runSyncLater(
+                        plugin,
+                        () -> {
+                            if (!activePlayers.containsKey(fp.getUuid())) return;
+                            for (Player p : cachedOnlinePlayers) {
+                                PacketHelper.sendTabListUpdateListed(p, fp, false);
+                            }
+
+                            var vc = plugin.getVelocityChannel();
+                            if (vc != null) vc.broadcastBotSpawn(fp);
+                        },
+                        3L);
+            }
+
+            if (persistence != null && Config.persistOnRestart() && !restorationInProgress) {
+                persistence.saveActiveListAsync(activePlayers.values());
+            }
+
+            // Restore inventory+XP from a prior manual despawn of the same bot name.
+            DespawnSnapshot despawnSnap = despawnSnapshots.remove(fp.getName().toLowerCase());
+            if (despawnSnap != null) {
+                removeDespawnSnapshotPersistent(fp.getName().toLowerCase());
+                final UUID snapBotUuid = fp.getUuid();
+                FppScheduler.runSyncLater(
+                        plugin,
+                        () -> {
+                            FakePlayer restoredFp = getByUuid(snapBotUuid);
+                            if (restoredFp == null) return;
+                            Player restoredBot = restoredFp.getPlayer();
+                            if (restoredBot == null || !restoredBot.isValid()) return;
+                            applyDespawnSnapshot(restoredBot, despawnSnap);
+                            Config.debug("[DespawnSnapshot] Restored inventory+XP to '" + restoredFp.getName() + "'.");
+                        },
+                        5L);
+            }
+
+            // Fire API spawn event.
+            var fppApi = plugin.getFppApi();
+            if (fppApi != null) {
+                FppBotSpawnEvent spawnEvt = new FppBotSpawnEvent(new FppBotImpl(fp), fp.isRestoredSpawn());
+                Bukkit.getPluginManager().callEvent(spawnEvt);
+            }
+            bodySpawnInProgress.remove(botUuid);
+            releaseSpawnChunkLease(fp);
+        };
+
+        FakePlayerBody.resolveAndFinish(plugin, fp, spawnLoc, finishBodySpawn[0], () -> {
+            if (activePlayers.get(botUuid) != fp) return;
+            if (Config.tabListEnabled()) {
+                for (Player p : cachedOnlinePlayers) {
+                    PacketHelper.sendTabListDisplayNameUpdate(p, fp);
+                }
+            }
+        });
     }
 
     private void protectRequestedSpawnLocation(FakePlayer fp, Player body, Location requested) {
@@ -1533,11 +2262,8 @@ public class FakePlayerManager {
         fp.setDisplayName(displayName);
         fp.setSpawnLocation(location);
         fp.setSpawnedBy(effectiveSpawner, spawnedByUuid);
-        usedNames.add(name);
         fp.setSpawnTick(System.currentTimeMillis());
-        activePlayers.put(restoredUuid, fp);
-        nameIndex.put(name.toLowerCase(), fp);
-        if (authManager != null) authManager.handleBotJoin(fp);
+        if (!registerActiveBot(fp, false)) return;
 
         if (db != null) {
             BotRecord record = new BotRecord(
@@ -1566,9 +2292,8 @@ public class FakePlayerManager {
 
     public void validateUserBotNames(UUID spawnerUuid, String spawnerName) {
         if (activePlayers.isEmpty()) return;
-        List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
-        for (FakePlayer fp : activePlayers.values()) {
-            if (!spawnerUuid.equals(fp.getSpawnedByUuid())) continue;
+        List<Player> online = new ArrayList<>(cachedOnlinePlayers);
+        for (FakePlayer fp : getBotsOwnedBy(spawnerUuid)) {
             if (!fp.getName().startsWith("ubot_")) continue;
 
             String current = fp.getDisplayName();
@@ -1708,7 +2433,7 @@ public class FakePlayerManager {
                     chunkLoader.releaseForBot(target);
                 }
 
-                List<Player> snapshot = new ArrayList<>(Bukkit.getOnlinePlayers());
+                List<Player> snapshot = new ArrayList<>(cachedOnlinePlayers);
                 PacketHelper.broadcastTabListRemove(target, snapshot);
 
                 var vc2 = plugin.getVelocityChannel();
@@ -1833,7 +2558,7 @@ public class FakePlayerManager {
             } catch (Exception e) {
                 FppLogger.warn("[DespawnSnapshot] Failed to load from DB: " + e.getMessage());
             }
-            return; // DB is authoritative - skip YAML
+            return; // DB is authoritative — skip YAML
         }
 
         // 2. YAML fallback
@@ -1884,7 +2609,7 @@ public class FakePlayerManager {
             return;
         }
 
-        // YAML fallback - write async
+        // YAML fallback — write async
         final File yamlFile = despawnSnapshotFile;
         if (yamlFile == null) return;
         final String invDataFinal = invData;
@@ -1935,7 +2660,7 @@ public class FakePlayerManager {
 
     /**
      * Serialises a {@link DespawnSnapshot} to a compact pipe-delimited string.
-     * Format: {@code slot:base64|slot:base64|…} - uses only chars safe from splitting.
+     * Format: {@code slot:base64|slot:base64|…} — uses only chars safe from splitting.
      * Uses {@code mainContents} (all 41 slots) which already contains armor and offhand.
      */
     private static String serializeSlots(DespawnSnapshot snap) {
@@ -2004,7 +2729,7 @@ public class FakePlayerManager {
     private boolean deleteInternal(
             String name, boolean fastVisualRemove, boolean suppressLeaveBroadcast, @Nullable Runnable onComplete) {
         FppLogger.warn("deleteInternal called without explicit reason for '" + name
-                + "' - defaulting to 'unspecified'. " + "Please update the caller to pass a descriptive reason.");
+                + "' — defaulting to 'unspecified'. " + "Please update the caller to pass a descriptive reason.");
         return deleteInternal(name, fastVisualRemove, suppressLeaveBroadcast, "unspecified", onComplete);
     }
 
@@ -2041,7 +2766,7 @@ public class FakePlayerManager {
 
         // Snapshot inventory + XP BEFORE removing from maps or despawning entity.
         // Must happen synchronously here (not in the delayed task) so bulk operations
-        // like /fpp despawn all don't race - by the time the 1-tick delay fires,
+        // like /fpp despawn all don't race — by the time the 1-tick delay fires,
         // earlier bots' entities may already be gone and snapBody.isOnline() fails.
         boolean preserveInventoryOnDespawn = !Config.dropItemsOnDespawn();
         if (!explicitUuidSpawn
@@ -2136,7 +2861,7 @@ public class FakePlayerManager {
                     FppLogger.debug("NMS-BOT", Config.debugNmsBot(), "Chunk loader released for '" + botName + "'");
                 }
 
-                List<Player> snapshot = new ArrayList<>(Bukkit.getOnlinePlayers());
+                List<Player> snapshot = new ArrayList<>(cachedOnlinePlayers);
                 PacketHelper.broadcastTabListRemove(target, snapshot);
                 FppLogger.debug(
                         "NMS-BOT",
@@ -2208,13 +2933,20 @@ public class FakePlayerManager {
         activePlayers.clear();
         nameIndex.clear();
         usedNames.clear();
+        botsByOwner.clear();
         entityIdIndex.clear();
+        botTickQueue.clear();
+        tabListScanQueue.clear();
+        validationQueue.clear();
+        lastLocationCaptureTick.clear();
+        initialSpawnPending.clear();
+        bodySpawnInProgress.clear();
 
         botHeadRotation.clear();
         botSpawnRotation.clear();
         lastSentVisualRotation.clear();
 
-        List<Player> snapshot = new ArrayList<>(Bukkit.getOnlinePlayers());
+        List<Player> snapshot = new ArrayList<>(cachedOnlinePlayers);
         int removedCount = 0;
 
         for (FakePlayer fp : toRemove) {
@@ -2235,12 +2967,14 @@ public class FakePlayerManager {
                 restoreExplicitUuidPlayerData(fp);
                 restoreExplicitUuidOperator(fp);
             }
+            releaseSpawnChunkLease(fp);
             if (chunkLoader != null) chunkLoader.releaseForBot(fp);
 
             PacketHelper.broadcastTabListRemove(fp, snapshot);
 
             despawningBotIds.remove(fp.getUuid());
             syntheticQuitBotIds.remove(fp.getUuid());
+            RankIntegration.cleanup(fp.getUuid());
             FppLogger.debug(
                     "NMS-BOT",
                     Config.debugNmsBot(),
@@ -2252,92 +2986,99 @@ public class FakePlayerManager {
     }
 
     public void applyBodyConfig() {
-        List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
+        applyBodyConfigBatch(activePlayers.values().iterator(), physicalBodiesEnabled());
+    }
 
-        if (physicalBodiesEnabled()) {
-
-            for (FakePlayer fp : new ArrayList<>(activePlayers.values())) {
-                Player body = fp.getPlayer();
-
-                if (body != null && body.isValid()) {
-
-                    body.setInvulnerable(false);
-                    body.setCollidable(Config.bodyPushable());
-                    try {
-                        var attr = body.getAttribute(AttributeCompat.MAX_HEALTH);
-                        if (attr != null) {
-                            double hp = Config.maxHealth();
-                            attr.setBaseValue(hp);
-                            if (body.getHealth() > hp) body.setHealth(hp);
-                        }
-                    } catch (Exception ignored) {
-                    }
-
-                } else if (fp.isBodyless()) {
-
-                    Location loc = fp.getSpawnLocation();
-                    if (loc == null || loc.getWorld() == null) continue;
-
-                    bodyTransitionBots.add(fp.getUuid());
-                    fp.setBodyless(false);
-                    try {
-                        FakePlayerBody.resolveAndFinish(plugin, fp, loc, () -> {
-                            Player newBody = FakePlayerBody.spawn(fp, loc, fp.getEffectivePing());
-                            if (newBody != null) {
-                                stampFakePlayerMarker(newBody, fp);
-                                fp.setPacketProfileName(fp.getName());
-
-                                if (Config.tabListEnabled()) {
-                                    for (Player p : online) {
-                                        PacketHelper.sendTabListRefreshEntry(p, fp);
-                                    }
-                                }
-
-                                PlayerJoinListener.stampFirstPlayed(newBody);
-                                FppLogger.info("BodyConfig: body shown for '" + fp.getName() + "'");
-                            } else {
-                                fp.setBodyless(true);
-                                FppLogger.warn("BodyConfig: failed to show body for '" + fp.getName() + "'");
-                            }
-                        });
-                    } finally {
-                        bodyTransitionBots.remove(fp.getUuid());
-                    }
-                }
+    private void applyBodyConfigBatch(Iterator<FakePlayer> bots, boolean bodiesEnabled) {
+        int budget = Config.performanceMaxValidationChecksPerPass();
+        boolean folia = NmsPlayerSpawner.isFoliaServer();
+        int checked = 0;
+        while (checked++ < budget && bots.hasNext()) {
+            FakePlayer fp = bots.next();
+            if (activePlayers.get(fp.getUuid()) != fp) continue;
+            Player body = fp.getPlayer();
+            Runnable update = () -> applyBodyConfigToBot(fp, bodiesEnabled);
+            if (!folia) {
+                update.run();
+            } else if (body != null) {
+                FppScheduler.runAtEntity(plugin, body, update);
+            } else {
+                Location loc = fp.getSpawnLocation();
+                if (loc != null && loc.getWorld() != null) FppScheduler.runAtLocation(plugin, loc, update);
             }
+        }
+        if (bots.hasNext()) {
+            FppScheduler.runSyncLater(plugin, () -> applyBodyConfigBatch(bots, bodiesEnabled), 1L);
+        }
+    }
 
+    private void applyBodyConfigToBot(FakePlayer fp, boolean bodiesEnabled) {
+        if (activePlayers.get(fp.getUuid()) != fp) return;
+        Player body = fp.getPlayer();
+        if (bodiesEnabled) {
+            if (body != null && body.isValid()) {
+                body.setInvulnerable(fp.isGodMode());
+                body.setCollidable(Config.bodyPushable());
+                try {
+                    var attr = body.getAttribute(AttributeCompat.MAX_HEALTH);
+                    if (attr != null) {
+                        double hp = Config.maxHealth();
+                        attr.setBaseValue(hp);
+                        if (body.getHealth() > hp) body.setHealth(hp);
+                    }
+                } catch (Exception ignored) {
+                }
+                return;
+            }
+            if (!fp.isBodyless()) return;
+
+            Location loc = fp.getSpawnLocation();
+            if (loc == null || loc.getWorld() == null || !bodySpawnInProgress.add(fp.getUuid())) return;
+            bodyTransitionBots.add(fp.getUuid());
+            fp.setBodyless(false);
+            FakePlayerBody.resolveAndFinish(plugin, fp, loc, () -> {
+                try {
+                    if (activePlayers.get(fp.getUuid()) != fp) return;
+                    Player newBody = FakePlayerBody.spawn(fp, loc, fp.getEffectivePing());
+                    if (newBody != null) {
+                        stampFakePlayerMarker(newBody, fp);
+                        fp.setPacketProfileName(fp.getName());
+                        if (Config.tabListEnabled()) {
+                            for (Player p : cachedOnlinePlayers) PacketHelper.sendTabListRefreshEntry(p, fp);
+                        }
+                        PlayerJoinListener.stampFirstPlayed(newBody);
+                        FppLogger.info("BodyConfig: body shown for '" + fp.getName() + "'");
+                    } else {
+                        fp.setBodyless(true);
+                        FppLogger.warn("BodyConfig: failed to show body for '" + fp.getName() + "'");
+                    }
+                } finally {
+                    bodySpawnInProgress.remove(fp.getUuid());
+                    bodyTransitionBots.remove(fp.getUuid());
+                }
+            });
             return;
         }
 
-        for (FakePlayer fp : new ArrayList<>(activePlayers.values())) {
-            Player body = fp.getPlayer();
-            if (body == null || !body.isOnline()) continue;
-
-            fp.setSpawnLocation(body.getLocation());
-            int entityId = body.getEntityId();
-
-            entityIdIndex.remove(entityId);
-            fp.setPhysicsEntity(null);
-            fp.setBodyless(true);
-
-            bodyTransitionBots.add(fp.getUuid());
-            boolean explicitUuidSpawn = isExplicitUuidSpawn(fp);
-            FppScheduler.runAtEntity(plugin, body, () -> {
-                try {
-                    if (explicitUuidSpawn) NmsPlayerSpawner.removeFakePlayerFast(body);
-                    else NmsPlayerSpawner.removeFakePlayer(body);
-                } finally {
-                    restoreExplicitUuidPlayerData(fp);
-                    restoreExplicitUuidOperator(fp);
-                    bodyTransitionBots.remove(fp.getUuid());
-                }
-
-                if (Config.tabListEnabled()) {
-                    for (Player p : online) PacketHelper.sendTabListRefreshEntry(p, fp);
-                }
-                FppLogger.info("BodyConfig: body hidden for '" + fp.getName() + "', now tab-list only");
-            });
+        if (body == null || !body.isOnline()) return;
+        fp.setSpawnLocation(body.getLocation());
+        entityIdIndex.remove(body.getEntityId());
+        fp.setPhysicsEntity(null);
+        fp.setBodyless(true);
+        bodyTransitionBots.add(fp.getUuid());
+        boolean explicitUuidSpawn = isExplicitUuidSpawn(fp);
+        try {
+            if (explicitUuidSpawn) NmsPlayerSpawner.removeFakePlayerFast(body);
+            else NmsPlayerSpawner.removeFakePlayer(body);
+        } finally {
+            restoreExplicitUuidPlayerData(fp);
+            restoreExplicitUuidOperator(fp);
+            bodyTransitionBots.remove(fp.getUuid());
         }
+        if (Config.tabListEnabled()) {
+            for (Player p : cachedOnlinePlayers) PacketHelper.sendTabListRefreshEntry(p, fp);
+        }
+        FppLogger.info("BodyConfig: body hidden for '" + fp.getName() + "', now tab-list only");
     }
 
     public void removeByName(String name) {
@@ -2371,9 +3112,11 @@ public class FakePlayerManager {
         UUID uuid = fp.getUuid();
         String name = fp.getName();
 
+        RankIntegration.cleanup(uuid);
         activePlayers.remove(uuid, fp);
         nameIndex.remove(name.toLowerCase(), fp);
         usedNames.remove(name);
+        removeFromOwnerIndex(fp, fp.getSpawnedByUuid());
         suppressDespawnSnapshotIds.remove(uuid);
 
         // Central cleanup: remove the tag on every despawn/death path (some remove the body
@@ -2386,7 +3129,7 @@ public class FakePlayerManager {
             playDespawnEffect(body.isOnline() ? body.getLocation() : effectFallbackLoc);
         } else {
             // Some despawn paths (e.g. death-without-respawn) null the entity reference before
-            // reaching here - the caller-supplied fallback (captured while the entity was still
+            // reaching here — the caller-supplied fallback (captured while the entity was still
             // valid) keeps the effect playing at the right spot instead of silently no-op'ing.
             playDespawnEffect(effectFallbackLoc);
         }
@@ -2398,8 +3141,12 @@ public class FakePlayerManager {
         navLockedBots.remove(uuid);
         trackedFallDistance.remove(uuid);
         lastFallY.remove(uuid);
+        lastLocationCaptureTick.remove(uuid);
         wasOnGround.remove(uuid);
         bodyTransitionBots.remove(uuid);
+        bodySpawnInProgress.remove(uuid);
+        initialSpawnPending.remove(uuid);
+        releaseSpawnChunkLease(fp);
 
         var pathfinding = plugin.getPathfindingService();
         if (pathfinding != null) pathfinding.cancel(uuid);
@@ -2422,7 +3169,7 @@ public class FakePlayerManager {
         if (db != null && removalReason != null) db.recordRemoval(uuid, removalReason);
     }
 
-    /** Small poof cloud + sound at the bot's location - plays on every despawn/delete/death-removal path. */
+    /** Small poof cloud + sound at the bot's location — plays on every despawn/delete/death-removal path. */
     private void playDespawnEffect(@Nullable Location at) {
         if (at == null) return;
         try {
@@ -2436,23 +3183,42 @@ public class FakePlayerManager {
     }
 
     public void syncToPlayer(Player player) {
-        FakePlayerBody.syncHiddenNamesTo(player);
-        if (!Config.tabListEnabled()) {
+        if (player == null) return;
+        UUID token = UUID.randomUUID();
+        playerSyncTokens.put(player.getUniqueId(), token);
+        Iterator<FakePlayer> bots = activePlayers.values().iterator();
+        FppScheduler.runAtEntity(plugin, player, () -> {
+            if (!player.isOnline() || playerSyncTokens.get(player.getUniqueId()) != token) return;
+            FakePlayerBody.beginHiddenNamesSync(player);
+            syncToPlayerBatch(player, bots, token);
+        });
+    }
 
-            for (FakePlayer fp : activePlayers.values()) {
+    private void syncToPlayerBatch(Player player, Iterator<FakePlayer> bots, UUID token) {
+        if (!player.isOnline() || playerSyncTokens.get(player.getUniqueId()) != token) return;
+        int batchSize = Config.performancePlayerSyncBatchSize();
+        boolean listed = Config.tabListEnabled();
+        int checked = 0;
+        while (checked++ < batchSize && bots.hasNext()) {
+            FakePlayer fp = bots.next();
+            if (activePlayers.get(fp.getUuid()) != fp) continue;
+            FakePlayerBody.syncHiddenNameTo(player, fp.getName());
+            if (listed) {
+                PacketHelper.sendTabListAdd(player, fp);
+                PacketHelper.sendTabListLatencyUpdate(player, fp);
+            } else {
                 PacketHelper.sendTabListUpdateListed(player, fp, false);
             }
-            return;
         }
-        for (FakePlayer fp : activePlayers.values()) {
-
-            PacketHelper.sendTabListAdd(player, fp);
-            PacketHelper.sendTabListLatencyUpdate(player, fp);
+        if (bots.hasNext()) {
+            FppScheduler.runAtEntityLaterWithId(plugin, player, () -> syncToPlayerBatch(player, bots, token), 1L);
+        } else {
+            playerSyncTokens.remove(player.getUniqueId(), token);
         }
     }
 
     public void applyTabListConfig() {
-        List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
+        List<Player> online = new ArrayList<>(cachedOnlinePlayers);
         if (online.isEmpty() || activePlayers.isEmpty()) return;
 
         boolean listed = Config.tabListEnabled();
@@ -2488,37 +3254,61 @@ public class FakePlayerManager {
     }
 
     public void validateEntities() {
+        int budget = validationCheckBudgetForLoad(activePlayers.size(), Config.performanceMaxValidationChecksPerPass());
+        boolean folia = NmsPlayerSpawner.isFoliaServer();
+        for (int checked = 0; checked < budget; checked++) {
+            FakePlayer fp = validationQueue.poll();
+            if (fp == null) break;
+            if (activePlayers.get(fp.getUuid()) != fp) continue;
+            validationQueue.offer(fp);
 
-        Set<String> activeNames =
-                activePlayers.values().stream().map(FakePlayer::getName).collect(Collectors.toSet());
-
-        for (FakePlayer fp : activePlayers.values()) {
-            Entity body = fp.getPhysicsEntity();
-
-            if (!physicalBodiesEnabled()) {
-                if (body != null && body.isValid()) {
-                    try {
-                        body.remove();
-                    } catch (Exception ignored) {
-                    }
-                    entityIdIndex.remove(body.getEntityId());
-                    fp.setPhysicsEntity(null);
+            Player body = fp.getPlayer();
+            Runnable validation = () -> validateEntity(fp);
+            if (!folia) {
+                validation.run();
+            } else if (body != null) {
+                FppScheduler.runAtEntity(plugin, body, validation);
+            } else {
+                Location loc = fp.getSpawnLocation();
+                if (loc != null && loc.getWorld() != null) {
+                    FppScheduler.runAtLocation(plugin, loc, validation);
                 }
-                continue;
             }
+        }
+    }
 
-            if (fp.isBodyless()) continue;
+    private void validateEntity(FakePlayer fp) {
+        if (activePlayers.get(fp.getUuid()) != fp) return;
+        Entity body = fp.getPhysicsEntity();
 
-            if (body != null && body.isValid()) continue;
+        if (!physicalBodiesEnabled()) {
+            if (body != null && body.isValid()) {
+                try {
+                    body.remove();
+                } catch (Exception ignored) {
+                }
+                entityIdIndex.remove(body.getEntityId());
+                fp.setPhysicsEntity(null);
+            }
+            return;
+        }
 
-            Config.debug("validateEntities: body of '" + fp.getName() + "' invalid - attempting respawn.");
+        if (fp.isBodyless()) return;
 
-            fp.setPhysicsEntity(null);
+        if (body != null && body.isValid()) return;
+        if (bodySpawnInProgress.contains(fp.getUuid())) return;
 
-            Location loc = fp.getSpawnLocation();
-            if (loc == null || loc.getWorld() == null) continue;
+        Config.debug("validateEntities: body of '" + fp.getName() + "' invalid - attempting respawn.");
 
-            FakePlayerBody.resolveAndFinish(plugin, fp, loc, () -> {
+        fp.setPhysicsEntity(null);
+
+        Location loc = fp.getSpawnLocation();
+        if (loc == null || loc.getWorld() == null) return;
+        if (!bodySpawnInProgress.add(fp.getUuid())) return;
+
+        FakePlayerBody.resolveAndFinish(plugin, fp, loc, () -> {
+            try {
+                if (activePlayers.get(fp.getUuid()) != fp) return;
                 Player newBody = FakePlayerBody.spawn(fp, loc, fp.getEffectivePing());
                 if (newBody == null) return;
 
@@ -2528,11 +3318,13 @@ public class FakePlayerManager {
                 FppScheduler.runSyncLater(
                         plugin,
                         () -> {
-                            for (Player p : Bukkit.getOnlinePlayers()) PacketHelper.sendTabListRefreshEntry(p, target);
+                            for (Player p : cachedOnlinePlayers) PacketHelper.sendTabListRefreshEntry(p, target);
                         },
                         2L);
-            });
-        }
+            } finally {
+                bodySpawnInProgress.remove(fp.getUuid());
+            }
+        });
     }
 
     public FakePlayer getByEntity(Entity entity) {
@@ -2626,8 +3418,77 @@ public class FakePlayerManager {
         return activePlayers.get(uuid);
     }
 
+    boolean isBodySpawnInProgress(UUID uuid) {
+        return uuid != null && bodySpawnInProgress.contains(uuid);
+    }
+
+    private boolean registerActiveBot(FakePlayer fp, boolean nameAlreadyReserved) {
+        if (fp == null || fp.getUuid() == null || fp.getName() == null) return false;
+        UUID uuid = fp.getUuid();
+        String name = fp.getName();
+        String nameKey = name.toLowerCase(Locale.ROOT);
+
+        // Claim the initial lifecycle before activePlayers publishes the bot. Validators iterate
+        // that concurrent map and must never observe a newly registered bot as an orphan body.
+        if (!initialSpawnPending.add(uuid)) return false;
+        if (!bodySpawnInProgress.add(uuid)) {
+            initialSpawnPending.remove(uuid);
+            return false;
+        }
+        if (!nameAlreadyReserved && !usedNames.add(name)) {
+            initialSpawnPending.remove(uuid);
+            bodySpawnInProgress.remove(uuid);
+            return false;
+        }
+        if (activePlayers.putIfAbsent(uuid, fp) != null) {
+            usedNames.remove(name);
+            initialSpawnPending.remove(uuid);
+            bodySpawnInProgress.remove(uuid);
+            return false;
+        }
+        if (nameIndex.putIfAbsent(nameKey, fp) != null) {
+            activePlayers.remove(uuid, fp);
+            usedNames.remove(name);
+            initialSpawnPending.remove(uuid);
+            bodySpawnInProgress.remove(uuid);
+            return false;
+        }
+        botTickQueue.offer(fp);
+        tabListScanQueue.offer(fp);
+        validationQueue.offer(fp);
+        botsByOwner
+                .computeIfAbsent(fp.getSpawnedByUuid(), ignored -> ConcurrentHashMap.newKeySet())
+                .add(fp);
+        return true;
+    }
+
     public void removeFromEntityIndex(int entityId) {
         entityIdIndex.remove(entityId);
+    }
+
+    public void interruptNavigationOwner(UUID botUuid, PathfindingService.Owner owner) {
+        if (botUuid == null || owner == null) return;
+        switch (owner) {
+            case MOVE -> {
+                var cmd = plugin.getMoveCommand();
+                if (cmd != null) cmd.cleanupBot(botUuid);
+            }
+            case MINE, USE, PLACE -> {
+                // Legacy task types — migrated to left-click/right-click
+                var leftCmd = plugin.getLeftClickCommand();
+                if (leftCmd != null) leftCmd.stopClicking(botUuid);
+                var rightCmd = plugin.getRightClickCommand();
+                if (rightCmd != null) rightCmd.stopClicking(botUuid);
+            }
+            case ATTACK -> {
+                var cmd = plugin.getAttackCommand();
+                if (cmd != null) cmd.stopAttacking(botUuid);
+            }
+            case SYSTEM -> {
+                var pathfinding = plugin.getPathfindingService();
+                if (pathfinding != null) pathfinding.cancel(botUuid);
+            }
+        }
     }
 
     public void registerEntityIndex(int entityId, FakePlayer fp) {
@@ -2657,7 +3518,7 @@ public class FakePlayerManager {
 
     /**
      * Changes a bot's visible display name (the floating name-tag name row, the entity display name
-     * and the tab-list entry) without touching its login name or fb07 UUID - identity is immutable.
+     * and the tab-list entry) without touching its login name or fb07 UUID — identity is immutable.
      * The mandatory "ʙᴏᴛ ʙʏ {owner}" disclosure row is preserved. The new name is persisted so it
      * survives restarts.
      */
@@ -2680,7 +3541,7 @@ public class FakePlayerManager {
         }
 
         if (Config.tabListEnabled() && body != null) {
-            for (Player p : Bukkit.getOnlinePlayers()) {
+            for (Player p : cachedOnlinePlayers) {
                 PacketHelper.sendTabListDisplayNameUpdate(p, bot);
             }
         }
@@ -2717,12 +3578,7 @@ public class FakePlayerManager {
         navJumpHolding.put(botUuid, value);
     }
 
-    // Reference-counted rather than a plain Set: with multiple task systems now able to run
-    // concurrently on the same bot (mine + PVE + auto-eat + a manual attack, etc.), more than one can
-    // hold this lock at once - a boolean set would let whichever one unlocks first wipe it out from
-    // under everyone else still using it. A count only clears (and Head-AI resumes) once every holder
-    // has released it.
-    private final Map<UUID, Integer> actingBots = new ConcurrentHashMap<>();
+    private final Set<UUID> actingBots = ConcurrentHashMap.newKeySet();
 
     public void lockForAction(UUID botUuid, Location loc) {
         lockForAction(botUuid, loc, false);
@@ -2732,18 +3588,72 @@ public class FakePlayerManager {
         if (lockPosition) {
             actionLockedBots.put(botUuid, loc.clone());
         }
-        actingBots.merge(botUuid, 1, Integer::sum);
+        actingBots.add(botUuid);
         botHeadRotation.put(botUuid, new float[] {loc.getYaw(), loc.getPitch()});
         botSpawnRotation.put(botUuid, new float[] {loc.getYaw(), loc.getPitch()});
     }
 
     public void unlockAction(UUID botUuid) {
         actionLockedBots.remove(botUuid);
-        actingBots.computeIfPresent(botUuid, (k, count) -> count > 1 ? count - 1 : null);
+        actingBots.remove(botUuid);
     }
 
     public boolean isActionLocked(UUID botUuid) {
-        return actingBots.containsKey(botUuid);
+        return actingBots.contains(botUuid);
+    }
+
+    /** The user-issued task types a bot can run. A bot runs at most one at a time. */
+    public enum BotAction {
+        MOVE,
+        FIND,
+        MINE,
+        USE,
+        ATTACK
+    }
+
+    /**
+     * Enforces single-action ("no multitasking"): stops every other user task for this bot before a
+     * new one commits. Call this as an action begins; the starting task sets up its own navigation
+     * afterwards, so cancelling the peers' navigation here is safe.
+     */
+    public void beginExclusiveAction(UUID uuid, BotAction keep) {
+        var find = plugin.getFindCommand();
+        var left = plugin.getLeftClickCommand();
+        var right = plugin.getRightClickCommand();
+        var attack = plugin.getAttackCommand();
+        var move = plugin.getMoveCommand();
+
+        if (keep != BotAction.FIND && find != null && find.isFinding(uuid)) find.cleanupBot(uuid);
+        if (keep != BotAction.MINE && left != null && left.isClicking(uuid)) left.stopClicking(uuid);
+        if (keep != BotAction.USE && right != null && right.isClicking(uuid)) right.stopClicking(uuid);
+        if (keep != BotAction.ATTACK && attack != null && attack.isAttacking(uuid)) attack.stopAttacking(uuid);
+        // Cancel a manual /fpp move (and any PVE chase) when a different task starts. find/mine/use
+        // re-establish their own navigation right after this call.
+        if (keep != BotAction.MOVE && move != null) move.cleanupBot(uuid);
+    }
+
+    /**
+     * True when a user-issued task is running for this bot. Background auto-behaviours (PVE) check
+     * this so they yield to manual control instead of multitasking.
+     */
+    public boolean hasActiveManualAction(UUID uuid) {
+        var find = plugin.getFindCommand();
+        var left = plugin.getLeftClickCommand();
+        var right = plugin.getRightClickCommand();
+        var attack = plugin.getAttackCommand();
+        if (find != null && find.isFinding(uuid)) return true;
+        if (left != null && left.isClicking(uuid)) return true;
+        if (right != null && right.isClicking(uuid)) return true;
+        if (attack != null && attack.isAttacking(uuid)) return true;
+        // Any user-owned navigation counts as busy too — this covers the walk-to-target phase of a
+        // move/mine/use/find command before its action commits. (ATTACK = PVE's own chase; SYSTEM =
+        // internal, neither counts as a manual task.)
+        var pathfinding = plugin.getPathfindingService();
+        if (pathfinding == null) return false;
+        return pathfinding.isNavigating(uuid, PathfindingService.Owner.MOVE)
+                || pathfinding.isNavigating(uuid, PathfindingService.Owner.MINE)
+                || pathfinding.isNavigating(uuid, PathfindingService.Owner.PLACE)
+                || pathfinding.isNavigating(uuid, PathfindingService.Owner.USE);
     }
 
     public void updateActionLockRotation(UUID botUuid, float yaw, float pitch) {
@@ -2787,14 +3697,39 @@ public class FakePlayerManager {
         return Collections.unmodifiableCollection(activePlayers.values());
     }
 
+    public List<Player> getRealPlayers() {
+        return cachedOnlinePlayers;
+    }
+
     public int getCount() {
         return activePlayers.size();
     }
 
     public List<FakePlayer> getBotsOwnedBy(UUID ownerUuid) {
-        return activePlayers.values().stream()
-                .filter(fp -> ownerUuid.equals(fp.getSpawnedByUuid()))
-                .collect(Collectors.toList());
+        if (ownerUuid == null) return List.of();
+        Set<FakePlayer> owned = botsByOwner.get(ownerUuid);
+        if (owned == null || owned.isEmpty()) return List.of();
+        return owned.stream()
+                .filter(fp -> activePlayers.get(fp.getUuid()) == fp)
+                .toList();
+    }
+
+    public void updateOwner(FakePlayer fp, String ownerName, UUID ownerUuid) {
+        if (fp == null) return;
+        UUID previous = fp.getSpawnedByUuid();
+        removeFromOwnerIndex(fp, previous);
+        fp.setSpawnedBy(ownerName, ownerUuid);
+        botsByOwner
+                .computeIfAbsent(fp.getSpawnedByUuid(), ignored -> ConcurrentHashMap.newKeySet())
+                .add(fp);
+    }
+
+    private void removeFromOwnerIndex(FakePlayer fp, UUID ownerUuid) {
+        if (fp == null || ownerUuid == null) return;
+        Set<FakePlayer> owned = botsByOwner.get(ownerUuid);
+        if (owned == null) return;
+        owned.remove(fp);
+        if (owned.isEmpty()) botsByOwner.remove(ownerUuid, owned);
     }
 
     public boolean teleportBot(FakePlayer fp, Location destination) {
@@ -2912,7 +3847,7 @@ public class FakePlayerManager {
     private void resetTransientBodyStateAfterTeleport(FakePlayer fp, Player body, Location current) {
         UUID uuid = fp.getUuid();
         try {
-            body.setInvulnerable(false);
+            body.setInvulnerable(fp.isGodMode());
             body.setNoDamageTicks(0);
             body.setFallDistance(0.0f);
             body.setVelocity(ZERO_VELOCITY);
@@ -2965,7 +3900,7 @@ public class FakePlayerManager {
         if (display == null || display.isBlank()) {
             display = fp.getName();
             Config.debug(
-                    "Display name was blank after sanitise for '" + fp.getName() + "' - falling back to raw bot name.");
+                    "Display name was blank after sanitise for '" + fp.getName() + "' — falling back to raw bot name.");
         }
         fp.setDisplayName(display);
 
@@ -2980,7 +3915,7 @@ public class FakePlayerManager {
         }
 
         if (Config.tabListEnabled()) {
-            List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
+            List<Player> online = new ArrayList<>(cachedOnlinePlayers);
             for (Player p : online) PacketHelper.sendTabListDisplayNameUpdate(p, fp);
         }
 
@@ -3002,7 +3937,7 @@ public class FakePlayerManager {
         NmsPlayerSpawner.applySkinToGameProfile(body, fp.getResolvedSkin());
         NmsPlayerSpawner.refreshPaperPlayer(body);
 
-        for (Player viewer : new ArrayList<>(Bukkit.getOnlinePlayers())) {
+        for (Player viewer : cachedOnlinePlayers) {
             if (viewer.getUniqueId().equals(body.getUniqueId())) continue;
             if (activePlayers.containsKey(viewer.getUniqueId())) continue;
             if (!viewer.canSee(body)) continue;
@@ -3040,7 +3975,7 @@ public class FakePlayerManager {
     /**
      * Sets an explicit ping value for the given bot, or clears it back to "no ping" (honest, not a
      * simulated/fake network-realism value) when {@code pingMs} is negative. Automatic fake ping
-     * simulation was removed - bots never fabricate network jitter to seem like a real connection.
+     * simulation was removed — bots never fabricate network jitter to seem like a real connection.
      */
     public void applyPing(FakePlayer fp, int pingMs) {
         if (fp == null) return;
@@ -3056,21 +3991,78 @@ public class FakePlayerManager {
     }
 
     private boolean shouldSendLaggedVisualUpdate(FakePlayer fp) {
-        return true;
+        int interval = visualSyncIntervalForLoad(activePlayers.size(), cachedOnlinePlayers.size());
+        return isStaggeredTick(fp, interval, 0);
     }
 
     private boolean shouldRunLaggedBehaviorUpdate(FakePlayer fp) {
-        return true;
+        int interval = behaviorIntervalForLoad(activePlayers.size());
+        return isStaggeredTick(fp, interval, 17);
     }
 
-    private List<Player> currentOnlineSnapshot() {
-        Collection<? extends Player> live = Bukkit.getOnlinePlayers();
-        List<Player> online = cachedOnlinePlayers;
-        if (online == null || online.size() != live.size()) {
-            online = new ArrayList<>(live);
-            cachedOnlinePlayers = online;
+    private Collection<Player> nearbyPlayers(Location center, double radius) {
+        World world = center.getWorld();
+        if (world == null || radius <= 0.0) return List.of();
+        // Folia's World#getNearbyPlayers can traverse neighbouring region entity slices while a
+        // region is being split/merged. The watchdog trace showed that call waiting on the
+        // regionizer write lock. Real players are few, event-tracked, and filtered for current
+        // region ownership by canUseViewer before any entity state is read.
+        if (NmsPlayerSpawner.isFoliaServer()) return cachedOnlinePlayers;
+        return world.getNearbyPlayers(center, radius);
+    }
+
+    private Collection<? extends Player> visualSyncViewers(Location center, double radius) {
+        return radius > 0.0 ? nearbyPlayers(center, radius) : cachedOnlinePlayers;
+    }
+
+    private boolean canUseViewer(Player viewer, Player bot, boolean foliaServer) {
+        if (viewer == null || viewer == bot) return false;
+        if (!isPlayerOwnedByCurrentRegion(viewer, foliaServer)) return false;
+        return viewer.isValid() && !activePlayers.containsKey(viewer.getUniqueId());
+    }
+
+    private boolean isStaggeredTick(FakePlayer fp, int interval, int salt) {
+        return isStaggeredTick(fp, interval, salt, visualSyncTickCounter);
+    }
+
+    private static boolean isStaggeredTick(FakePlayer fp, int interval, int salt, long tick) {
+        if (interval <= 1) return true;
+        long offset = (long) fp.getUuid().hashCode() + salt;
+        return Math.floorMod(tick + offset, (long) interval) == 0L;
+    }
+
+    static int visualSyncIntervalForLoad(int botCount, int viewerCount) {
+        long fanOut = (long) Math.max(0, botCount) * Math.max(0, viewerCount);
+        if (botCount >= 256 || fanOut >= 2_048L) return 4;
+        if (botCount >= 64 || fanOut >= 256L) return 2;
+        return 1;
+    }
+
+    static int behaviorIntervalForLoad(int botCount) {
+        if (botCount >= 256) return 4;
+        if (botCount >= 64) return 2;
+        return 1;
+    }
+
+    static int botTickBudgetForLoad(int botCount, int configuredMax) {
+        return Math.min(Math.max(0, botCount), Math.max(1, configuredMax));
+    }
+
+    static int tabListCheckBudgetForLoad(int botCount, int configuredMax) {
+        return Math.min(Math.max(0, botCount), Math.max(1, configuredMax));
+    }
+
+    static int validationCheckBudgetForLoad(int botCount, int configuredMax) {
+        return Math.min(Math.max(0, botCount), Math.max(1, configuredMax));
+    }
+
+    private static boolean isPlayerOwnedByCurrentRegion(Player player, boolean foliaServer) {
+        if (!foliaServer) return true;
+        try {
+            return Bukkit.isOwnedByCurrentRegion(player);
+        } catch (Throwable ignored) {
+            return false;
         }
-        return online;
     }
 
     private String resolveDespawnDisplayName(FakePlayer fp) {
@@ -3085,7 +4077,7 @@ public class FakePlayerManager {
     private UUID resolveUuid(String botName) {
         // Deterministic, name-derived, never contacts Mojang: sequential names embed their number
         // (bot → fb07…-000000000001, bot2 → …-000000000002), custom names get the same fb07 prefix
-        // with a name hash in the low bits - so a bot never inherits a real account's identity.
+        // with a name hash in the low bits — so a bot never inherits a real account's identity.
         return BotIdentityCache.deterministicBotUuid(botName);
     }
 
@@ -3102,10 +4094,31 @@ public class FakePlayerManager {
     private String nextSequentialName() {
         for (int n = 1; n <= 1_000_000; n++) {
             String candidate = n == 1 ? "bot" : "bot" + n;
-            if (usedNames.contains(candidate)) continue;
             if (Bukkit.getPlayerExact(candidate) != null) continue;
-            usedNames.add(candidate);
+            if (!usedNames.add(candidate)) continue;
             return candidate;
+        }
+        return null;
+    }
+
+    /**
+     * Reserves a random configured bot name, falling back to an obviously synthetic Bot-number
+     * name when the configured pool is empty or exhausted.
+     */
+    private String nextRandomName() {
+        List<String> pool = cleanNamePool;
+        int size = pool.size();
+        int start = size > 1 ? ThreadLocalRandom.current().nextInt(size) : 0;
+        for (int offset = 0; offset < size; offset++) {
+            String candidate = pool.get((start + offset) % size);
+            if (getByName(candidate) != null || Bukkit.getPlayerExact(candidate) != null) continue;
+            if (usedNames.add(candidate)) return candidate;
+        }
+
+        for (int attempt = 0; attempt < 1_000; attempt++) {
+            String candidate = "Bot" + ThreadLocalRandom.current().nextInt(1_000_000, 10_000_000);
+            if (getByName(candidate) != null || Bukkit.getPlayerExact(candidate) != null) continue;
+            if (usedNames.add(candidate)) return candidate;
         }
         return null;
     }
@@ -3130,6 +4143,7 @@ public class FakePlayerManager {
                     new BlockIterator(start.getWorld(), start.toVector(), dir, 0.0, (int) Math.ceil(distance) + 1);
             while (iter.hasNext()) {
                 Block block = iter.next();
+                if (NmsPlayerSpawner.isFoliaServer() && !Bukkit.isOwnedByCurrentRegion(block)) return false;
                 Material type = block.getType();
                 if (!type.isSolid()) continue;
                 if (isGlassLike(type)) continue;
@@ -3185,5 +4199,11 @@ public class FakePlayerManager {
                 fp.isRespawnOnDeath(),
                 fp.hasCustomPing(),
                 fp.getLuckpermsGroup());
+    }
+
+    private record SpawnChunkLease(World world, int chunkX, int chunkZ) {
+        boolean sameChunk(SpawnChunkLease other) {
+            return other != null && world == other.world && chunkX == other.chunkX && chunkZ == other.chunkZ;
+        }
     }
 }

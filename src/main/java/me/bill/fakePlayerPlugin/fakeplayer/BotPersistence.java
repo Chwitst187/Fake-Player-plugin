@@ -586,7 +586,14 @@ public final class BotPersistence {
     public void restore(FakePlayerManager manager) {
         if (!Config.persistOnRestart()) {
             clearUnifiedSection(ROOT_BOTS);
+            clearUnifiedSection(ROOT_TASKS);
             deleteFile(dataFile);
+            deleteFile(tasksFile);
+            DatabaseManager db = plugin.getDatabaseManager();
+            if (db != null) {
+                db.clearActiveBots();
+                db.clearBotTasks();
+            }
             FppLogger.info("Bot persistence is disabled - skipping restore.");
             return;
         }
