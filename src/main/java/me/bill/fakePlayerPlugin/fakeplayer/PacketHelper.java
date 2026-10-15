@@ -167,7 +167,12 @@ public final class PacketHelper {
             vec3Zero = scanStaticField(vec3Class, "ZERO");
 
             entityTypeClass = nmsLoader.loadClass("net.minecraft.world.entity.EntityType");
-            entityTypePlayer = scanStaticField(entityTypeClass, "PLAYER");
+            try {
+                entityTypePlayer = scanStaticField(entityTypeClass, "PLAYER");
+            } catch (Exception ignored) {
+                Class<?> entityTypesClass = nmsLoader.loadClass("net.minecraft.world.entity.EntityTypes");
+                entityTypePlayer = scanStaticField(entityTypesClass, "PLAYER");
+            }
 
             playerInfoUpdateCtor = findPlayerInfoUpdateCtor();
             if (playerInfoUpdateCtor == null)
